@@ -13,6 +13,11 @@ import argparse
 import sys
 from pathlib import Path
 from PIL import Image
+from logger import setup_logger
+import logging
+
+setup_logger()
+log = logging.getLogger("merge_png") 
 
 # Снимаем лимит на размер изображений (по умолчанию ~178 млн пикселей)
 Image.MAX_IMAGE_PIXELS = None

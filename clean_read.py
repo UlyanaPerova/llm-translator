@@ -1,6 +1,11 @@
 import sys
 import time
 from playwright.sync_api import sync_playwright
+from logger import setup_logger
+import logging
+
+setup_logger()
+log = logging.getLogger("clean_read") 
 
 
 def process_page(page):

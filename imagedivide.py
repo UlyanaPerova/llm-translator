@@ -1,5 +1,10 @@
 from PIL import Image
 import numpy as np
+from logger import setup_logger
+import logging
+
+setup_logger()
+log = logging.getLogger("imagedivide") 
 
 Image.MAX_IMAGE_PIXELS = None
 

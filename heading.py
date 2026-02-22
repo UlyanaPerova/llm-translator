@@ -2,6 +2,11 @@ from docx import Document
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 import re
+from logger import setup_logger
+import logging
+
+setup_logger()
+log = logging.getLogger("heading") 
 
 doc = Document("chapters_5_36_rus_1.docx")
 

@@ -24,6 +24,11 @@ import uuid
 from pathlib import Path
 from typing import Optional
 from xml.etree import ElementTree as ET
+from logger import setup_logger
+import logging
+
+setup_logger()
+log = logging.getLogger("docx2epub") 
 
 from docx import Document
 from docx.shared import Pt, Cm, Inches, Emu, RGBColor

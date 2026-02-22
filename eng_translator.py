@@ -13,6 +13,11 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+from logger import setup_logger
+import logging
+
+setup_logger()
+log = logging.getLogger("eng_translate") 
 
 load_dotenv()
 
