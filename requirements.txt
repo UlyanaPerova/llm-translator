@@ -1,6 +1,9 @@
+playwright
+python-dotenv
 openai
 python-docx
 ebooklib
 beautifulsoup4
 lxml
-logger
+Pillow
+numpy
