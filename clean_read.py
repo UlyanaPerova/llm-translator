@@ -8,6 +8,8 @@ import logging
 setup_logger()
 log = logging.getLogger("clean_read")
 
+CDP_PORT = 9222
+
 
 # ── Загрузка списка глав ──────────────────────────────────────────────
 
@@ -100,6 +102,32 @@ def process_page(page, do_scroll: bool):
     log.info("Страница готова для скриншота")
 
 
+# ── Подключение к Chrome ──────────────────────────────────────────────
+
+def connect_to_chrome(pw):
+    """Подключается к Chrome через CDP (remote debugging)."""
+    endpoint = f"http://127.0.0.1:{CDP_PORT}"
+    log.info("Подключаюсь к Chrome на %s...", endpoint)
+    try:
+        browser = pw.chromium.connect_over_cdp(endpoint)
+    except Exception as e:
+        log.error("Не удалось подключиться к Chrome: %s", e)
+        print()
+        print("╔══════════════════════════════════════════════════════════════╗")
+        print("║  Chrome не запущен с remote debugging.                      ║")
+        print("║  Запусти его командой:                                      ║")
+        print("║                                                             ║")
+        print('║  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\    ║')
+        print('║  Chrome --remote-debugging-port=9222                        ║')
+        print("║                                                             ║")
+        print("║  Потом запусти скрипт снова.                                ║")
+        print("╚══════════════════════════════════════════════════════════════╝")
+        raise SystemExit(1)
+
+    log.info("Подключён. Контексты: %d", len(browser.contexts))
+    return browser
+
+
 # ── Главный цикл ─────────────────────────────────────────────────────
 
 def main():
@@ -123,16 +151,15 @@ def main():
     log.info("Старт сессии: %d глав, скролл %s", len(chapters), "вкл" if do_scroll else "выкл")
 
     with sync_playwright() as p:
-        browser = p.firefox.launch(headless=False)
-        page = browser.new_page(viewport={"width": 1600, "height": 900})
+        browser = connect_to_chrome(p)
 
-        # Первая страница — открываем дважды (для логина / Cloudflare)
+        # Берём существующий контекст Chrome (со всеми cookies и сессиями)
+        context = browser.contexts[0]
+        page = context.new_page()
+
+        # Первая страница
         url = chapters[current]
         log.info("[%d/%d] Открываю %s", current + 1, len(chapters), url)
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        time.sleep(3)
-
-        log.info("Перезагружаю после логина...")
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
         process_page(page, do_scroll)
         log.info("[%d/%d] Готово — фоткай через CleanShot X", current + 1, len(chapters))
@@ -168,8 +195,9 @@ def main():
                 print(f"Неизвестная команда: '{cmd}'. Введи 'next' или Enter.")
 
         log.info("Сессия завершена. Обработано %d/%d глав", current + 1, len(chapters))
-        print("Закрываю браузер...")
-        browser.close()
+        # Закрываем только вкладку, НЕ браузер — Chrome остаётся открытым
+        page.close()
+        print("Вкладка закрыта. Chrome остаётся открытым.")
 
 
 if __name__ == "__main__":
