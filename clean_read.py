@@ -1,19 +1,42 @@
-import sys
+import argparse
 import time
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 from logger import setup_logger
 import logging
 
 setup_logger()
-log = logging.getLogger("clean_read") 
+log = logging.getLogger("clean_read")
 
 
-def process_page(page):
-    """Скролл + очистка текущей страницы."""
-    print("Жду загрузки...")
-    time.sleep(10)
+# ── Загрузка списка глав ──────────────────────────────────────────────
 
-    print("Скроллю...")
+def load_chapters(path: str) -> list[str]:
+    """Читает chapters.txt — по одной ссылке на строку, пропуская # и пустые."""
+    p = Path(path)
+    if not p.exists():
+        log.error("Файл %s не найден", path)
+        raise SystemExit(1)
+
+    urls = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            urls.append(line)
+
+    if not urls:
+        log.error("В файле %s нет ссылок", path)
+        raise SystemExit(1)
+
+    log.info("Загружено %d глав из %s", len(urls), path)
+    return urls
+
+
+# ── Обработка страницы ────────────────────────────────────────────────
+
+def scroll_page(page):
+    """Скролл до конца для подгрузки lazy-load контента."""
+    log.debug("Скролл страницы...")
     prev = 0
     while True:
         page.evaluate("window.scrollBy(0, 800)")
@@ -22,16 +45,17 @@ def process_page(page):
         if curr == prev:
             break
         prev = curr
-
     page.evaluate("window.scrollTo(0, 0)")
-    time.sleep(2)
+    time.sleep(1)
 
-    print("Чищу страницу...")
+
+def clean_page(page):
+    """Удаление мешающих элементов со страницы."""
+    log.debug("Чистка страницы...")
     page.evaluate("""
     document.querySelectorAll('.parComment').forEach(e => e.remove());
 
-    // Удаление по ID
-    ['headerMenu','navHeaderChapter', 'talkAreaBox','action_controller_footer',
+    ['headerMenu','navHeaderChapter','talkAreaBox','action_controller_footer',
      'share_article_div','donate_top_div','formCommentBox','comment_div',
      'footerContent','footerContentMobile','cookieConsentBar',
     ].forEach(id => {
@@ -39,7 +63,6 @@ def process_page(page):
         if(el) el.remove();
     });
 
-    // Удаление по точным наборам классов
     [
         '.rounded.bg-accent.p-4.mx-auto.shadow-lg.md\\\\:max-w-4xl',
         '.py-2.mb-4',
@@ -49,58 +72,102 @@ def process_page(page):
         document.querySelectorAll(sel).forEach(e => e.remove());
     });
 
-    // Навигация, футеры, реклама и т.д.
     document.querySelectorAll(
         'nav, .navbar, .header-menu-2021, .bottomToolbar, ' +
         '.footer-2021, #footer, .modal, .modal-backdrop, ' +
         '.google-auto-placed, footer.bg-header'
     ).forEach(e => e.remove());
 
-    // Удаление элементов с Shadow DOM, содержащих ipr-container
     document.querySelectorAll('*').forEach(el => {
         if (el.shadowRoot && el.shadowRoot.querySelector('.ipr-container')) {
             el.remove();
         }
     });
 
-    // Livewire-компоненты (комментарии)
     document.querySelectorAll('[wire\\\\:id]').forEach(e => e.remove());
-""")
+    """)
 
-    print("✅ Готово! Фоткай через CleanShot X.")
 
+def process_page(page, do_scroll: bool):
+    """Полная обработка: ожидание + скролл (опционально) + очистка."""
+    log.info("Жду загрузки...")
+    time.sleep(10)
+
+    if do_scroll:
+        scroll_page(page)
+
+    clean_page(page)
+    log.info("Страница готова для скриншота")
+
+
+# ── Главный цикл ─────────────────────────────────────────────────────
 
 def main():
-    if len(sys.argv) < 2:
-        print('Использование: python clean_read.py "URL"')
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Очистка веб-страниц для скриншотов")
+    parser.add_argument(
+        "-f", "--file",
+        default="chapters.txt",
+        help="Путь к файлу со ссылками (по умолчанию chapters.txt)",
+    )
+    parser.add_argument(
+        "--no-scroll",
+        action="store_true",
+        help="Пропустить скролл (быстрее, но lazy-load контент может не подгрузиться)",
+    )
+    args = parser.parse_args()
 
-    url = sys.argv[1]
+    chapters = load_chapters(args.file)
+    do_scroll = not args.no_scroll
+    current = 0
+
+    log.info("Старт сессии: %d глав, скролл %s", len(chapters), "вкл" if do_scroll else "выкл")
 
     with sync_playwright() as p:
         browser = p.firefox.launch(headless=False)
         page = browser.new_page(viewport={"width": 1600, "height": 900})
 
-        # Открываем первую ссылку
-        print(f"Открываю {url}...")
+        # Первая страница — открываем дважды (для логина / Cloudflare)
+        url = chapters[current]
+        log.info("[%d/%d] Открываю %s", current + 1, len(chapters), url)
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
         time.sleep(3)
 
-        # Обрабатываем первую страницу (перезагружаем после логина)
-        print(f"Перезагружаю {url} после логина...")
+        log.info("Перезагружаю после логина...")
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        process_page(page)
+        process_page(page, do_scroll)
+        log.info("[%d/%d] Готово — фоткай через CleanShot X", current + 1, len(chapters))
 
-        # Цикл для следующих ссылок
+        # Цикл навигации
         while True:
+            remaining = len(chapters) - current - 1
             print()
-            next_url = input("Вставь следующую ссылку (или 'q' для выхода): ").strip()
-            if not next_url or next_url.lower() == "q":
-                break
-            print(f"Открываю {next_url}...")
-            page.goto(next_url, wait_until="domcontentloaded", timeout=60000)
-            process_page(page)
+            if remaining > 0:
+                prompt = f"[{current + 1}/{len(chapters)}] 'next' — следующая глава, Enter — выход: "
+            else:
+                prompt = f"[{current + 1}/{len(chapters)}] Все главы пройдены. Enter — выход: "
 
+            cmd = input(prompt).strip().lower()
+
+            if cmd == "next":
+                if current + 1 >= len(chapters):
+                    log.info("Все главы уже обработаны")
+                    continue
+                current += 1
+                url = chapters[current]
+                log.info("[%d/%d] Открываю %s", current + 1, len(chapters), url)
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    process_page(page, do_scroll)
+                    log.info("[%d/%d] Готово — фоткай", current + 1, len(chapters))
+                except Exception as e:
+                    log.error("[%d/%d] Ошибка: %s", current + 1, len(chapters), e)
+            elif cmd == "":
+                log.info("Выход по запросу пользователя")
+                break
+            else:
+                print(f"Неизвестная команда: '{cmd}'. Введи 'next' или Enter.")
+
+        log.info("Сессия завершена. Обработано %d/%d глав", current + 1, len(chapters))
         print("Закрываю браузер...")
         browser.close()
 
