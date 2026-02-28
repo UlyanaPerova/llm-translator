@@ -166,6 +166,7 @@ def call_gpt_json(
     messages: list[dict],
     temperature: float = TEMPERATURE_EXTRACT,
     max_retries: int = MAX_RETRIES,
+    max_output_tokens: int = 16000,
 ) -> tuple[dict | None, int]:
     """
     Call GPT expecting a JSON response. Retries with exponential backoff.
@@ -178,11 +179,28 @@ def call_gpt_json(
                 messages=messages,
                 temperature=temperature,
                 response_format={"type": "json_object"},
+                max_completion_tokens=max_output_tokens,
             )
+            finish_reason = response.choices[0].finish_reason
+            if finish_reason == "length":
+                log.warning(
+                    "GPT output truncated (hit token limit, attempt %d/%d)",
+                    attempt,
+                    max_retries,
+                )
+                if attempt < max_retries:
+                    # retry with higher limit
+                    max_output_tokens = min(max_output_tokens * 2, 64000)
+                    log.info("Retrying with max_output_tokens=%d", max_output_tokens)
+                    continue
+                else:
+                    log.error("Output still truncated after %d attempts", max_retries)
+                    return None, 0
+
             content = response.choices[0].message.content.strip()
             result = json.loads(content)
             tokens = response.usage.total_tokens if response.usage else 0
-            log.debug("GPT response: %d tokens", tokens)
+            log.debug("GPT response: %d tokens, finish_reason=%s", tokens, finish_reason)
             return result, tokens
 
         except json.JSONDecodeError as e:
@@ -364,16 +382,14 @@ def aggregate_raw_results(results: list[dict]) -> dict:
 # ─────────────────────────── PHASE 2: CONSOLIDATION ───────────────────────────
 
 
-def _consolidate_category(
-    client: OpenAI, category: str, entries: list[dict], system_prompt: str
-) -> list[dict]:
-    """Consolidate a single category via GPT. Returns consolidated entries."""
-    if not entries:
-        return []
+CONSOLIDATION_BATCH_SIZE = 50
 
-    log.info("Consolidating %d %s entries...", len(entries), category)
-    print(f"  {category}: {len(entries)} entries...", end=" ", flush=True)
 
+def _consolidate_batch(
+    client: OpenAI, category: str, entries: list[dict], system_prompt: str,
+    batch_label: str = "",
+) -> tuple[list[dict] | None, int]:
+    """Consolidate a single batch of entries. Returns (entries, tokens) or (None, 0)."""
     messages = [
         {"role": "system", "content": system_prompt},
         {
@@ -387,26 +403,109 @@ def _consolidate_category(
     )
 
     if result is None:
-        print("FAIL (keeping local)")
-        log.warning("Consolidation failed for %s, using local aggregation", category)
-        return None
+        return None, 0
 
     consolidated = result.get(category, [])
     if not consolidated and entries:
-        print(f"EMPTY (keeping {len(entries)} local)")
         log.warning(
-            "GPT returned empty %s but had %d entries, using local",
+            "GPT returned empty %s%s but had %d entries",
             category,
+            batch_label,
             len(entries),
         )
-        return None
+        return None, tokens
 
-    consolidated = sorted(
-        consolidated, key=lambda x: x.get("original", "").lower()
+    # Validate: warn if GPT dropped entries
+    if len(consolidated) < len(entries) * 0.5:
+        log.warning(
+            "GPT %s%s: input %d entries, output %d (lost >50%%, likely truncated)",
+            category,
+            batch_label,
+            len(entries),
+            len(consolidated),
+        )
+
+    return consolidated, tokens
+
+
+def _consolidate_category(
+    client: OpenAI, category: str, entries: list[dict], system_prompt: str
+) -> list[dict]:
+    """Consolidate a single category via GPT. Splits into batches if needed."""
+    if not entries:
+        return []
+
+    log.info("Consolidating %d %s entries...", len(entries), category)
+
+    # Small enough — single call
+    if len(entries) <= CONSOLIDATION_BATCH_SIZE:
+        print(f"  {category}: {len(entries)} entries...", end=" ", flush=True)
+        consolidated, tokens = _consolidate_batch(client, category, entries, system_prompt)
+        if consolidated is None:
+            print("FAIL (keeping local)")
+            log.warning("Consolidation failed for %s, using local aggregation", category)
+            return None
+        consolidated = sorted(consolidated, key=lambda x: x.get("original", "").lower())
+        print(f"OK ({len(consolidated)}, {tokens} tok)")
+        log.info("Consolidated %s: %d entries (%d tokens)", category, len(consolidated), tokens)
+        return consolidated
+
+    # Large category — split into batches
+    batches = [
+        entries[i : i + CONSOLIDATION_BATCH_SIZE]
+        for i in range(0, len(entries), CONSOLIDATION_BATCH_SIZE)
+    ]
+    print(f"  {category}: {len(entries)} entries in {len(batches)} batches...")
+
+    all_consolidated = []
+    total_tokens = 0
+    failed_batches = 0
+
+    for batch_idx, batch in enumerate(batches, 1):
+        batch_label = f" batch {batch_idx}/{len(batches)}"
+        print(f"    batch {batch_idx}/{len(batches)} ({len(batch)} entries)...", end=" ", flush=True)
+
+        consolidated, tokens = _consolidate_batch(
+            client, category, batch, system_prompt, batch_label
+        )
+        total_tokens += tokens
+
+        if consolidated is not None:
+            all_consolidated.extend(consolidated)
+            print(f"OK ({len(consolidated)}, {tokens} tok)")
+        else:
+            # Fallback: keep original batch entries with suggested_translation renamed
+            for entry in batch:
+                if "suggested_translation" in entry:
+                    entry["translation"] = entry.pop("suggested_translation")
+            all_consolidated.extend(batch)
+            failed_batches += 1
+            print(f"FAIL (keeping {len(batch)} local)")
+
+        if batch_idx < len(batches):
+            time.sleep(DELAY_BETWEEN_REQUESTS)
+
+    if failed_batches > 0:
+        log.warning(
+            "%d/%d batches failed for %s, used local fallback",
+            failed_batches,
+            len(batches),
+            category,
+        )
+
+    all_consolidated = sorted(
+        all_consolidated, key=lambda x: x.get("original", "").lower()
     )
-    print(f"OK ({len(consolidated)}, {tokens} tok)")
-    log.info("Consolidated %s: %d entries (%d tokens)", category, len(consolidated), tokens)
-    return consolidated
+    print(f"  {category} total: {len(all_consolidated)} entries ({total_tokens} tok)")
+    log.info(
+        "Consolidated %s: %d entries in %d batches (%d tokens, %d failed)",
+        category,
+        len(all_consolidated),
+        len(batches),
+        total_tokens,
+        failed_batches,
+    )
+    return all_consolidated
 
 
 def consolidate_glossary(client: OpenAI, aggregated: dict) -> dict:
