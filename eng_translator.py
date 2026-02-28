@@ -344,6 +344,11 @@ def _parse_formatting(text: str) -> list[tuple[str, bool, bool]]:
     return segments if segments else [(text, False, False)]
 
 
+def _strip_html_tags(text: str) -> str:
+    """Remove HTML <b>, </b>, <i>, </i> tags from text."""
+    return re.sub(r"</?[bi]>", "", text)
+
+
 # ─────────────────────────── TEXT EXTRACTION ───────────────────────────
 
 
@@ -610,6 +615,87 @@ def translate_chunk(
             return f"[ОШИБКА ПЕРЕВОДА ЧАНКА {chunk_num}: {e2}]"
 
 
+# ─────────────────────────── FORMATTING TRANSFER (PASS 2) ───────────────────────────
+
+FORMATTING_TRANSFER_PROMPT = """You are a formatting transfer tool. You receive:
+1. An original English text with HTML formatting tags (<b> for bold, <i> for italic)
+2. A Russian translation of the same text WITHOUT formatting tags
+
+Your task: Add the HTML formatting tags (<b>, </b>, <i>, </i>) to the Russian translation so they wrap the corresponding translated words/phrases, matching the original English formatting.
+
+Rules:
+- Apply <b>...</b> to Russian words that correspond to bold English words
+- Apply <i>...</i> to Russian words that correspond to italic English words
+- Do NOT change the Russian text — only insert tags
+- Preserve all line breaks and paragraph structure exactly
+- Return ONLY the tagged Russian text, nothing else"""
+
+
+def transfer_formatting(
+    client: OpenAI,
+    original_tagged: str,
+    translated_plain: str,
+    chunk_num: int,
+    total: int,
+) -> str:
+    """Pass 2: Transfer formatting from original English to translated Russian.
+    Uses a separate focused GPT call with low temperature for precise tag placement."""
+    in_b = original_tagged.count("<b>")
+    in_i = original_tagged.count("<i>")
+    print(
+        f"  🎨 Форматирование чанка {chunk_num}/{total} ({in_b} bold, {in_i} italic)...",
+        end=" ", flush=True,
+    )
+    log.info("Format transfer chunk %d/%d: %d <b>, %d <i> to transfer",
+             chunk_num, total, in_b, in_i)
+
+    user_message = (
+        f"[ORIGINAL ENGLISH TEXT WITH FORMATTING TAGS:]\n"
+        f"{original_tagged}\n\n"
+        f"[RUSSIAN TRANSLATION — add formatting tags to this text:]\n"
+        f"{translated_plain}"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": FORMATTING_TRANSFER_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        result = response.choices[0].message.content.strip()
+        tokens = response.usage.total_tokens if response.usage else "?"
+
+        out_b = result.count("<b>")
+        out_i = result.count("<i>")
+        print(f"✅ (<b> {in_b}→{out_b}, <i> {in_i}→{out_i}, {tokens} tok)")
+        log.info("Format transfer chunk %d/%d done: <b> %d→%d, <i> %d→%d, %s tokens",
+                 chunk_num, total, in_b, out_b, in_i, out_i, tokens)
+
+        # Sanity check: if zero tags came back, transfer failed — keep plain version
+        if out_b == 0 and out_i == 0:
+            log.warning("Format transfer returned no tags, keeping plain translation")
+            return translated_plain
+
+        # Validate: text content should be unchanged (ignoring tags)
+        result_stripped = _strip_html_tags(result)
+        if result_stripped.split() != translated_plain.split():
+            log.warning(
+                "Format transfer modified translation text for chunk %d/%d! "
+                "Keeping formatted version but check quality.",
+                chunk_num, total,
+            )
+
+        return result
+
+    except Exception as e:
+        log.error("Format transfer failed for chunk %d/%d: %s", chunk_num, total, e)
+        print(f"⚠️ ({e}), пропускаю")
+        return translated_plain  # Fallback: unformatted translation is better than nothing
+
+
 # ─────────────────────────── TRANSLATION CACHE ───────────────────────────
 
 
@@ -867,20 +953,31 @@ def main():
             log.info("No valid cache found, starting from scratch")
 
     for i in range(start_chunk, len(chunks) + 1):
-        chunk = chunks[i - 1]
+        chunk_tagged = chunks[i - 1]
+        chunk_clean = _strip_html_tags(chunk_tagged)
+        has_formatting = "<b>" in chunk_tagged or "<i>" in chunk_tagged
+
         prev = None
         if args.context > 0 and translated:
-            prev = translated[-1]
+            # Strip tags from context so Pass 1 sees clean text
+            prev = _strip_html_tags(translated[-1])
 
+        # Pass 1: translate clean text (no formatting markers)
         result = translate_chunk(
             client,
-            chunk,
+            chunk_clean,
             i,
             len(chunks),
             previous_translation=prev,
             reasoning_effort=reasoning,
             glossary=glossary,
         )
+
+        # Pass 2: transfer formatting from original (only if source had tags)
+        if has_formatting:
+            time.sleep(args.delay)
+            result = transfer_formatting(client, chunk_tagged, result, i, len(chunks))
+
         translated.append(result)
 
         # Backup: save cache after each chunk
