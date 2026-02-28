@@ -16,8 +16,8 @@ import os
 from logger import setup_logger
 import logging
 
-setup_logger()
-log = logging.getLogger("eng_translate") 
+setup_logger(prefix="eng_translate")
+log = logging.getLogger("eng_translate")
 
 load_dotenv()
 
@@ -75,6 +75,56 @@ IMPORTANT: If you receive context from a previous translation chunk (marked as [
 # ─────────────────────────── GLOSSARY ───────────────────────────
 
 
+def load_glossary(filepath: str) -> dict[str, str]:
+    """
+    Load glossary from JSON. Supports both:
+    - Legacy flat format: {"English": "Russian", ...}
+    - New structured format: {"characters": [...], "terms": [...], "locations": [...]}
+    Returns a flat dict for use with build_system_prompt.
+    """
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if "characters" in data or "terms" in data or "locations" in data:
+        return _flatten_structured_glossary(data)
+    return data
+
+
+def _flatten_structured_glossary(data: dict) -> dict[str, str]:
+    """Convert structured glossary to flat dict with gender/indeclinability annotations."""
+    flat = {}
+
+    for char in data.get("characters", []):
+        original = char.get("original", "")
+        translation = char.get("translation", "")
+        if not original or not translation:
+            continue
+        gender = char.get("gender", "unknown")
+        indeclinable = char.get("indeclinable", False)
+        parts = [gender]
+        if indeclinable:
+            parts.append("indeclinable")
+        annotation = f"{translation} [{', '.join(parts)}]"
+        flat[original] = annotation
+        for alias in char.get("aliases", []):
+            if alias:
+                flat[alias] = annotation
+
+    for term in data.get("terms", []):
+        original = term.get("original", "")
+        translation = term.get("translation", "")
+        if original and translation:
+            flat[original] = translation
+
+    for loc in data.get("locations", []):
+        original = loc.get("original", "")
+        translation = loc.get("translation", "")
+        if original and translation:
+            flat[original] = translation
+
+    return flat
+
+
 def build_system_prompt(glossary: dict[str, str]) -> str:
     """Build system prompt, appending glossary if provided."""
     if not glossary:
@@ -83,7 +133,11 @@ def build_system_prompt(glossary: dict[str, str]) -> str:
     glossary_lines = "\n".join(f"  {eng} → {rus}" for eng, rus in glossary.items())
     return (
         SYSTEM_PROMPT_BASE
-        + "\n\nMANDATORY GLOSSARY — always use these exact translations (decline normally in Russian according to grammatical context):\n"
+        + "\n\nMANDATORY GLOSSARY — always use these exact translations.\n"
+        + "Gender annotations [m], [f] indicate the character's gender for correct Russian "
+        + "adjective/verb agreement. [indeclinable] means the name does NOT change by "
+        + "grammatical case in Russian (e.g., keep 'Элис' as 'Элис' in all cases).\n"
+        + "Names without [indeclinable] MUST be declined normally by Russian grammar rules.\n"
         + glossary_lines
     )
 
@@ -397,8 +451,7 @@ def main():
     if args.glossary:
         if not os.path.isfile(args.glossary):
             sys.exit(f"Словарь не найден: {args.glossary}")
-        with open(args.glossary, "r", encoding="utf-8") as f:
-            glossary = json.load(f)
+        glossary = load_glossary(args.glossary)
         print(f"📚 Словарь загружен: {len(glossary)} терминов")
 
     # Reasoning effort

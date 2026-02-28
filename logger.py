@@ -3,12 +3,12 @@ import os
 from datetime import datetime
 
 
-def setup_logger(log_dir="logs"):
+def setup_logger(log_dir="logs", prefix="clean_read"):
     """Настройка логгера: вывод в консоль + файл в logs/."""
     os.makedirs(log_dir, exist_ok=True)
 
     log_file = os.path.join(
-        log_dir, f"clean_read_{datetime.now():%Y-%m-%d}.log"
+        log_dir, f"{prefix}_{datetime.now():%Y-%m-%d}.log"
     )
 
     root = logging.getLogger()
