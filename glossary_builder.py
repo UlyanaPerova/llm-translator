@@ -84,11 +84,11 @@ Guidelines:
 - If no entities of a category are found, return an empty list for that category.
 - Do NOT invent entities. Only extract what is explicitly present in the text."""
 
-CONSOLIDATION_SYSTEM_PROMPT = """You are a literary glossary editor. You will receive a raw aggregated glossary extracted
-from multiple chunks of a novel. Your task is to:
+CONSOLIDATION_PROMPT_CHARACTERS = """You are a literary glossary editor. You will receive a raw list of CHARACTER entries
+extracted from multiple chunks of a novel. Your task is to:
 
-1. DEDUPLICATE: Merge entries that refer to the same entity (same name, different casing,
-   or one is an alias of another). Combine their notes and aliases.
+1. DEDUPLICATE: Merge entries that refer to the same character (same name, different casing,
+   or one is an alias/nickname of another). Combine their notes and aliases.
 2. RESOLVE CONFLICTS: If gender was "unknown" in some chunks but identified in others,
    use the identified gender. If translations differ, pick the most consistent one and
    put alternatives into the "alternatives" field.
@@ -96,7 +96,7 @@ from multiple chunks of a novel. Your task is to:
 4. MERGE ALIASES: If "Paw" and "Pawarit" refer to the same character, keep one entry
    with aliases.
 
-Return the consolidated glossary as JSON with this structure:
+Return ONLY a JSON object with a single key "characters" containing the consolidated list:
 {
   "characters": [
     {
@@ -108,7 +108,21 @@ Return the consolidated glossary as JSON with this structure:
       "alternatives": [],
       "notes": "combined context"
     }
-  ],
+  ]
+}
+
+Sort entries alphabetically by "original". Do NOT omit any characters."""
+
+CONSOLIDATION_PROMPT_TERMS = """You are a literary glossary editor. You will receive a raw list of TERM entries
+(magic systems, ranks, titles, organizations, items, creatures) extracted from multiple chunks of a novel.
+
+Your task is to:
+1. DEDUPLICATE: Merge entries that refer to the same term. Combine notes.
+2. RESOLVE CONFLICTS: If translations differ, pick the best one and put alternatives into "alternatives".
+3. STANDARDIZE: Ensure consistent Russian translations.
+
+Return ONLY a JSON object with a single key "terms" containing the consolidated list:
+{
   "terms": [
     {
       "original": "Term",
@@ -117,7 +131,21 @@ Return the consolidated glossary as JSON with this structure:
       "alternatives": [],
       "notes": "combined context"
     }
-  ],
+  ]
+}
+
+Sort entries alphabetically by "original". Do NOT omit any terms."""
+
+CONSOLIDATION_PROMPT_LOCATIONS = """You are a literary glossary editor. You will receive a raw list of LOCATION entries
+extracted from multiple chunks of a novel.
+
+Your task is to:
+1. DEDUPLICATE: Merge entries that refer to the same place. Combine notes.
+2. RESOLVE CONFLICTS: If translations differ, pick the best one and put alternatives into "alternatives".
+3. STANDARDIZE: Ensure consistent Russian transliterations/translations.
+
+Return ONLY a JSON object with a single key "locations" containing the consolidated list:
+{
   "locations": [
     {
       "original": "Place",
@@ -128,7 +156,7 @@ Return the consolidated glossary as JSON with this structure:
   ]
 }
 
-Sort all entries alphabetically by "original" within each category."""
+Sort entries alphabetically by "original". Do NOT omit any locations."""
 
 # ─────────────────────────── API CALL WITH RETRY ───────────────────────────
 
@@ -336,60 +364,114 @@ def aggregate_raw_results(results: list[dict]) -> dict:
 # ─────────────────────────── PHASE 2: CONSOLIDATION ───────────────────────────
 
 
-def consolidate_glossary(client: OpenAI, aggregated: dict) -> dict:
-    """Send aggregated raw results to GPT for final consolidation."""
-    entity_count = (
-        len(aggregated["characters"])
-        + len(aggregated["terms"])
-        + len(aggregated["locations"])
-    )
-    log.info("Consolidating %d total entities via GPT...", entity_count)
-    print(f"\nConsolidating {entity_count} entities via GPT...", end=" ", flush=True)
+def _consolidate_category(
+    client: OpenAI, category: str, entries: list[dict], system_prompt: str
+) -> list[dict]:
+    """Consolidate a single category via GPT. Returns consolidated entries."""
+    if not entries:
+        return []
+
+    log.info("Consolidating %d %s entries...", len(entries), category)
+    print(f"  {category}: {len(entries)} entries...", end=" ", flush=True)
 
     messages = [
-        {"role": "system", "content": CONSOLIDATION_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
-            "content": json.dumps(aggregated, ensure_ascii=False, indent=2),
+            "content": json.dumps(entries, ensure_ascii=False, indent=2),
         },
     ]
 
     result, tokens = call_gpt_json(
         client, messages, temperature=TEMPERATURE_CONSOLIDATE
     )
+
     if result is None:
-        print("FAIL (using local aggregation)")
-        log.warning("Consolidation failed, using locally aggregated results")
-        return _finalize_aggregated(aggregated)
+        print("FAIL (keeping local)")
+        log.warning("Consolidation failed for %s, using local aggregation", category)
+        return None
 
-    for key in ("characters", "terms", "locations"):
-        if key not in result:
-            result[key] = []
-        result[key] = sorted(
-            result[key], key=lambda x: x.get("original", "").lower()
+    consolidated = result.get(category, [])
+    if not consolidated and entries:
+        print(f"EMPTY (keeping {len(entries)} local)")
+        log.warning(
+            "GPT returned empty %s but had %d entries, using local",
+            category,
+            len(entries),
         )
+        return None
 
-    chars = len(result["characters"])
-    terms = len(result["terms"])
-    locs = len(result["locations"])
-    print(f"OK ({chars}ch, {terms}t, {locs}l, {tokens} tok)")
+    consolidated = sorted(
+        consolidated, key=lambda x: x.get("original", "").lower()
+    )
+    print(f"OK ({len(consolidated)}, {tokens} tok)")
+    log.info("Consolidated %s: %d entries (%d tokens)", category, len(consolidated), tokens)
+    return consolidated
+
+
+def consolidate_glossary(client: OpenAI, aggregated: dict) -> dict:
+    """Consolidate each category separately via GPT."""
+    entity_count = (
+        len(aggregated["characters"])
+        + len(aggregated["terms"])
+        + len(aggregated["locations"])
+    )
+    log.info("Consolidating %d total entities via GPT (per-category)...", entity_count)
+    print(f"\nConsolidating {entity_count} entities via GPT (per-category):")
+
+    # Finalize a copy of aggregated as fallback
+    fallback = _finalize_aggregated_copy(aggregated)
+
+    categories = [
+        ("characters", CONSOLIDATION_PROMPT_CHARACTERS),
+        ("terms", CONSOLIDATION_PROMPT_TERMS),
+        ("locations", CONSOLIDATION_PROMPT_LOCATIONS),
+    ]
+
+    result = {}
+    for cat_key, prompt in categories:
+        entries = aggregated.get(cat_key, [])
+        if not entries:
+            result[cat_key] = []
+            continue
+
+        consolidated = _consolidate_category(client, cat_key, entries, prompt)
+        if consolidated is not None:
+            result[cat_key] = consolidated
+        else:
+            # fallback to locally aggregated + finalized
+            result[cat_key] = fallback.get(cat_key, [])
+            log.info("Using local fallback for %s (%d entries)", cat_key, len(result[cat_key]))
+
+        time.sleep(DELAY_BETWEEN_REQUESTS)
+
+    chars = len(result.get("characters", []))
+    terms = len(result.get("terms", []))
+    locs = len(result.get("locations", []))
+    print(f"  Total: {chars}ch, {terms}t, {locs}l")
     log.info(
-        "Consolidated: %d characters, %d terms, %d locations (%d tokens)",
+        "Consolidation complete: %d characters, %d terms, %d locations",
         chars,
         terms,
         locs,
-        tokens,
     )
     return result
 
 
 def _finalize_aggregated(aggregated: dict) -> dict:
-    """Rename suggested_translation -> translation in locally aggregated data."""
+    """Rename suggested_translation -> translation in locally aggregated data (mutates)."""
     for category in ("characters", "terms", "locations"):
         for entry in aggregated.get(category, []):
             if "suggested_translation" in entry:
                 entry["translation"] = entry.pop("suggested_translation")
     return aggregated
+
+
+def _finalize_aggregated_copy(aggregated: dict) -> dict:
+    """Rename suggested_translation -> translation on a deep copy (does not mutate original)."""
+    import copy
+    data = copy.deepcopy(aggregated)
+    return _finalize_aggregated(data)
 
 
 # ─────────────────────────── MERGE WITH EXISTING ───────────────────────────
@@ -503,8 +585,8 @@ def estimate_cost(text: str, chunk_count: int) -> tuple[float, float, float]:
     input_tokens_p1 = len(text) * 0.8 + (500 * chunk_count)
     output_tokens_p1 = chunk_count * 300
 
-    # Phase 2: consolidation
-    input_tokens_p2 = output_tokens_p1 * 0.5
+    # Phase 2: consolidation (3 separate calls — one per category)
+    input_tokens_p2 = output_tokens_p1 * 0.5 + (500 * 3)  # system prompts
     output_tokens_p2 = input_tokens_p2 * 0.8
 
     total_input = input_tokens_p1 + input_tokens_p2
@@ -588,7 +670,7 @@ Examples:
     print(f"  input ~{input_tokens:.0f} tokens, output ~{output_tokens:.0f} tokens")
     print(f"  Phase 1: {len(chunks)} extraction calls")
     if not args.no_consolidate:
-        print(f"  Phase 2: 1 consolidation call")
+        print(f"  Phase 2: up to 3 consolidation calls (one per category)")
     print()
 
     confirm = input("Continue? [Y/n]: ").strip().lower()
