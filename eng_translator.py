@@ -125,6 +125,18 @@ def _flatten_structured_glossary(data: dict) -> dict[str, str]:
     return flat
 
 
+def filter_glossary_for_chunk(glossary: dict[str, str], chunk: str) -> dict[str, str]:
+    """Return only glossary entries whose original key appears in the chunk text."""
+    if not glossary:
+        return {}
+    chunk_lower = chunk.lower()
+    return {
+        eng: rus
+        for eng, rus in glossary.items()
+        if eng.lower() in chunk_lower
+    }
+
+
 def build_system_prompt(glossary: dict[str, str]) -> str:
     """Build system prompt, appending glossary if provided."""
     if not glossary:
@@ -276,10 +288,17 @@ def translate_chunk(
 
     user_message = build_user_message(chunk, previous_translation)
 
+    chunk_glossary = filter_glossary_for_chunk(glossary or {}, chunk)
+    if glossary and chunk_glossary:
+        log.debug(
+            "Chunk %d/%d: using %d/%d glossary entries",
+            chunk_num, total, len(chunk_glossary), len(glossary),
+        )
+
     kwargs = dict(
         model=MODEL,
         messages=[
-            {"role": "system", "content": build_system_prompt(glossary or {})},
+            {"role": "system", "content": build_system_prompt(chunk_glossary)},
             {"role": "user", "content": user_message},
         ],
     )
