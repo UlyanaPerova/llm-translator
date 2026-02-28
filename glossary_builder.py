@@ -576,6 +576,26 @@ def save_glossary(
     print(f"\nSaved: {output_path} ({total} entries)")
 
 
+# ─────────────────────────── RAW RESULTS CACHE ───────────────────────────
+
+
+def save_raw_results(raw_results: list[dict], cache_path: str):
+    """Save Phase 1 raw results to disk so they can be reused."""
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(raw_results, f, ensure_ascii=False, indent=2)
+    log.info("Raw results cached to %s (%d chunks)", cache_path, len(raw_results))
+    print(f"Raw results cached: {cache_path} ({len(raw_results)} chunks)")
+
+
+def load_raw_results(cache_path: str) -> list[dict]:
+    """Load Phase 1 raw results from cache."""
+    with open(cache_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    log.info("Loaded raw results from %s (%d chunks)", cache_path, len(data))
+    print(f"Loaded raw results: {cache_path} ({len(data)} chunks)")
+    return data
+
+
 # ─────────────────────────── COST ESTIMATION ───────────────────────────
 
 
@@ -610,9 +630,17 @@ Examples:
   python3 glossary_builder.py novel.docx -o glossary.json
   python3 glossary_builder.py novel.epub --chunk-size 8000
   python3 glossary_builder.py novel.docx --merge existing_glossary.json
+
+  # Resume from cached Phase 1 results (skip extraction):
+  python3 glossary_builder.py --from-raw novel_raw.json -o glossary.json
         """,
     )
-    parser.add_argument("input", help="Path to .epub or .docx file")
+    parser.add_argument(
+        "input",
+        nargs="?",
+        default=None,
+        help="Path to .epub or .docx file (not needed with --from-raw)",
+    )
     parser.add_argument(
         "-o",
         "--output",
@@ -641,63 +669,94 @@ Examples:
         action="store_true",
         help="Skip GPT consolidation phase, use local deduplication only",
     )
+    parser.add_argument(
+        "--from-raw",
+        type=str,
+        default=None,
+        help="Load cached Phase 1 raw results from file (skip extraction, go straight to aggregation + consolidation)",
+    )
 
     args = parser.parse_args()
 
-    if not os.path.isfile(args.input):
-        sys.exit(f"File not found: {args.input}")
+    # ── Mode: resume from cached raw results ──
+    if args.from_raw:
+        if not os.path.isfile(args.from_raw):
+            sys.exit(f"Raw cache not found: {args.from_raw}")
 
-    output_path = args.output or f"{Path(args.input).stem}_glossary.json"
+        output_path = args.output
+        if not output_path:
+            stem = Path(args.from_raw).stem.replace("_raw", "")
+            output_path = f"{stem}_glossary.json"
 
-    # Extract text
-    log.info("Reading file: %s", args.input)
-    print(f"Reading: {args.input}")
-    text = extract_text(args.input)
-    log.info("Extracted %d characters", len(text))
-    print(f"Extracted {len(text):,} characters")
+        raw_results = load_raw_results(args.from_raw)
+        source_file = args.from_raw
+        chunk_count = len(raw_results)
 
-    if not text.strip():
-        sys.exit("File is empty or text extraction failed.")
+    # ── Mode: full extraction from input file ──
+    else:
+        if not args.input:
+            sys.exit("Specify input file or use --from-raw to resume from cache.")
+        if not os.path.isfile(args.input):
+            sys.exit(f"File not found: {args.input}")
 
-    # Chunk
-    chunks = split_into_chunks(text, max_chars=args.chunk_size)
-    log.info("Split into %d chunks (max %d chars)", len(chunks), args.chunk_size)
-    print(f"Split into {len(chunks)} chunks (max {args.chunk_size} chars)")
+        output_path = args.output or f"{Path(args.input).stem}_glossary.json"
+        raw_cache_path = f"{Path(args.input).stem}_raw.json"
+        source_file = args.input
 
-    # Cost estimate
-    cost, input_tokens, output_tokens = estimate_cost(text, len(chunks))
-    print(f"\nEstimated cost: ${cost:.3f}")
-    print(f"  input ~{input_tokens:.0f} tokens, output ~{output_tokens:.0f} tokens")
-    print(f"  Phase 1: {len(chunks)} extraction calls")
-    if not args.no_consolidate:
-        print(f"  Phase 2: up to 3 consolidation calls (one per category)")
-    print()
+        # Extract text
+        log.info("Reading file: %s", args.input)
+        print(f"Reading: {args.input}")
+        text = extract_text(args.input)
+        log.info("Extracted %d characters", len(text))
+        print(f"Extracted {len(text):,} characters")
 
-    confirm = input("Continue? [Y/n]: ").strip().lower()
-    if confirm == "n":
-        sys.exit("Cancelled.")
+        if not text.strip():
+            sys.exit("File is empty or text extraction failed.")
 
-    # Phase 1: Extract from each chunk
-    client = OpenAI(api_key=API_KEY)
-    raw_results = []
-    total_tokens = 0
+        # Chunk
+        chunks = split_into_chunks(text, max_chars=args.chunk_size)
+        log.info("Split into %d chunks (max %d chars)", len(chunks), args.chunk_size)
+        print(f"Split into {len(chunks)} chunks (max {args.chunk_size} chars)")
 
-    print(f"\n--- Phase 1: Extraction ---")
-    for i, chunk in enumerate(chunks, 1):
-        result = extract_entities_from_chunk(client, chunk, i, len(chunks))
-        if result:
-            raw_results.append(result)
-        if i < len(chunks):
-            time.sleep(args.delay)
+        # Cost estimate
+        cost, input_tokens, output_tokens = estimate_cost(text, len(chunks))
+        print(f"\nEstimated cost: ${cost:.3f}")
+        print(f"  input ~{input_tokens:.0f} tokens, output ~{output_tokens:.0f} tokens")
+        print(f"  Phase 1: {len(chunks)} extraction calls")
+        if not args.no_consolidate:
+            print(f"  Phase 2: up to 3 consolidation calls (one per category)")
+        print()
 
-    if not raw_results:
-        sys.exit("No entities extracted from any chunk.")
+        confirm = input("Continue? [Y/n]: ").strip().lower()
+        if confirm == "n":
+            sys.exit("Cancelled.")
 
-    succeeded = len(raw_results)
-    failed = len(chunks) - succeeded
-    if failed > 0:
-        log.warning("%d/%d chunks failed extraction", failed, len(chunks))
-        print(f"\nWarning: {failed}/{len(chunks)} chunks failed")
+        # Phase 1: Extract from each chunk
+        client = OpenAI(api_key=API_KEY)
+        raw_results = []
+
+        print(f"\n--- Phase 1: Extraction ---")
+        for i, chunk in enumerate(chunks, 1):
+            result = extract_entities_from_chunk(client, chunk, i, len(chunks))
+            if result:
+                raw_results.append(result)
+            if i < len(chunks):
+                time.sleep(args.delay)
+
+        if not raw_results:
+            sys.exit("No entities extracted from any chunk.")
+
+        # Cache raw results immediately
+        save_raw_results(raw_results, raw_cache_path)
+
+        succeeded = len(raw_results)
+        failed = len(chunks) - succeeded
+        chunk_count = len(chunks)
+        if failed > 0:
+            log.warning("%d/%d chunks failed extraction", failed, chunk_count)
+            print(f"\nWarning: {failed}/{chunk_count} chunks failed")
+
+    # ── From here: same flow for both modes ──
 
     # Aggregate locally
     aggregated = aggregate_raw_results(raw_results)
@@ -713,6 +772,7 @@ Examples:
     )
 
     # Phase 2: GPT Consolidation
+    client = OpenAI(api_key=API_KEY)
     if not args.no_consolidate:
         print(f"\n--- Phase 2: Consolidation ---")
         glossary = consolidate_glossary(client, aggregated)
@@ -725,7 +785,7 @@ Examples:
 
     # Backup and save
     backup_if_exists(output_path)
-    save_glossary(glossary, output_path, args.input, len(chunks))
+    save_glossary(glossary, output_path, source_file, chunk_count)
 
     # Summary
     chars = len(glossary.get("characters", []))
