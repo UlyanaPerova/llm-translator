@@ -44,7 +44,7 @@ except ImportError:
 
 API_KEY = os.getenv("OPENAI_API_KEY") or sys.exit("OPENAI_API_KEY не найден в окружении. Установи его в .env файле.")
 MODEL = "gpt-5.2"
-TEMPERATURE = 0.55
+TEMPERATURE = 0.45
 MAX_CHARS_PER_CHUNK = 4000
 CONTEXT_PARAGRAPHS = 3
 DELAY_BETWEEN_REQUESTS = 1.5
@@ -56,7 +56,7 @@ Rules:
 1. Translate into natural, expressive, literary Russian. NEVER translate literally. Completely restructure sentences to follow Russian syntax, rhythm, and logic. If a sentence sounds like it was translated — rewrite it.
 2. Eliminate passive voice wherever possible. Russian strongly prefers active constructions. "He was stopped" → "Его остановили" or "Он остановился", never "Он был остановлен".
 3. Watch for tautology and cacophony, same-root words in Russian. Always reread your Russian output and fix any repetitions of roots, sounds, or syllables in close proximity.
-4. Use em-dashes (—) rarely, mostly never, except for dialogues. Do NOT insert em-dashes that weren't implied in the original. Russian text overloaded with em-dashes looks amateurish. Prefer commas, colons, semicolons, or sentence breaks where they fit naturally. 
+4. Use em-dashes (—) rarely, mostly never, except for dialogues. Do NOT insert em-dashes that weren't implied in the original. Russian text overloaded with em-dashes looks amateurish. Prefer commas, semicolons, or sentence breaks where they fit naturally. 
    - Every line of dialogue starts on a new line with an em-dash: — Привет.
    - Dialogue is NEVER embedded mid-paragraph. Each speaker's line is a separate paragraph.
    - The only exception: a single utterance split by an attribution — Привет, — сказал он, — как дела?
