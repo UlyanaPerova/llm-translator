@@ -951,10 +951,11 @@ def docx_to_epub(
             if chapter_split == "pagebreak" and ps.page_break_before:
                 is_new_chapter = True
 
-            if is_new_chapter and current_html.strip():
-                chapters.append((current_title, current_html))
+            if is_new_chapter:
+                if current_html.strip():
+                    chapters.append((current_title, current_html))
+                    current_html = ""
                 current_title = para.text.strip() or f"Chapter {len(chapters) + 1}"
-                current_html = ""
 
             current_html += convert_paragraph_to_html(
                 para, doc, images_map, epub_images, footnotes,
