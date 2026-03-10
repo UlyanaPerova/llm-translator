@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-English → Russian Literary Translator
+English -> Russian Literary Translator (QWEN-MT)
 Reads .epub or .docx, splits into chunks with overlap context,
-translates via GPT-5.2 with glossary support, saves as .docx
+translates via Qwen-MT with glossary support, saves as .docx
+
+Uses Alibaba Cloud DashScope API (OpenAI-compatible mode).
+QWEN-MT is a specialized translation model — it does NOT support system
+messages. Translation instructions are passed in the user message.
+The built-in `terms` parameter enforces glossary consistency.
 """
 
 import argparse
@@ -16,22 +21,22 @@ import os
 from logger import setup_logger
 import logging
 
-setup_logger(prefix="eng_translate")
-log = logging.getLogger("eng_translate")
+setup_logger(prefix="eng_translate_qwen")
+log = logging.getLogger("eng_translate_qwen")
 
 load_dotenv()
 
 try:
     from openai import OpenAI
 except ImportError:
-    sys.exit("openai не установлен. Запусти: pip install openai")
+    sys.exit("openai not installed. Run: pip install openai")
 
 try:
     from docx import Document
     from docx.shared import Pt, Cm
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 except ImportError:
-    sys.exit("python-docx не установлен. Запусти: pip install python-docx")
+    sys.exit("python-docx not installed. Run: pip install python-docx")
 
 try:
     import ebooklib
@@ -42,35 +47,41 @@ except ImportError:
 
 # ─────────────────────────── CONFIG ───────────────────────────
 
-API_KEY = os.getenv("OPENAI_API_KEY") or sys.exit("OPENAI_API_KEY не найден в окружении. Установи его в .env файле.")
-MODEL = "gpt-5.1"
+API_KEY = os.getenv("DASHSCOPE_API_KEY") or sys.exit(
+    "DASHSCOPE_API_KEY not found. Set it in .env file."
+)
+BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+MODEL = "qwen-mt-plus"
 TEMPERATURE = 0.45
 MAX_CHARS_PER_CHUNK = 4000
 CONTEXT_PARAGRAPHS = 3
 DELAY_BETWEEN_REQUESTS = 1.5
-REASONING_EFFORT = None  # None, "low", "medium", "high", "xhigh"
 
-SYSTEM_PROMPT_BASE = """You are a professional Russian literary translator. Your translation must be indistinguishable from a text originally written by a skilled native Russian author.
+# QWEN-MT constraints:
+#  - No system messages (single user message only)
+#  - Max 8192 input tokens
+#  - translation_options.terms for glossary enforcement
+#  - translation_options.domains only works when target_lang is English
+
+TRANSLATION_INSTRUCTIONS = """You are a professional Russian literary translator. Your translation must be indistinguishable from a text originally written by a skilled native Russian author.
 
 Rules:
 1. Translate into natural, expressive, literary Russian. NEVER translate literally. Completely restructure sentences to follow Russian syntax, rhythm, and logic. If a sentence sounds like it was translated — rewrite it.
-2. Eliminate passive voice wherever possible. Russian strongly prefers active constructions. "He was stopped" → "Его остановили" or "Он остановился", never "Он был остановлен".
+2. Eliminate passive voice wherever possible. Russian strongly prefers active constructions. "He was stopped" -> "Его остановили" or "Он остановился", never "Он был остановлен".
 3. Watch for tautology and cacophony, same-root words in Russian. Always reread your Russian output and fix any repetitions of roots, sounds, or syllables in close proximity.
-4. Use em-dashes (—) rarely, mostly never, except for dialogues. Do NOT insert em-dashes that weren't implied in the original. Russian text overloaded with em-dashes looks amateurish. Prefer commas, semicolons, or sentence breaks where they fit naturally. 
+4. Use em-dashes (—) rarely, mostly never, except for dialogues. Do NOT insert em-dashes that weren't implied in the original. Russian text overloaded with em-dashes looks amateurish. Prefer commas, semicolons, or sentence breaks where they fit naturally.
    - Every line of dialogue starts on a new line with an em-dash: — Привет.
    - Dialogue is NEVER embedded mid-paragraph. Each speaker's line is a separate paragraph.
    - The only exception: a single utterance split by an attribution — Привет, — сказал он, — как дела?
    - Never use English-style quotation marks for dialogue.
 6. If the source text contains obvious typos, garbled characters, or OCR artifacts, silently correct them based on context before translating.
-7. For character names: transliterate them into Russian on first mention (e.g. Pawarit → Паварит) and use only the Russian form throughout. For brand names, titles of works, and organization names: keep in English unless they have an established Russian equivalent.
+7. For character names: transliterate them into Russian on first mention (e.g. Pawarit -> Паварит) and use only the Russian form throughout. For brand names, titles of works, and organization names: keep in English unless they have an established Russian equivalent.
 8. Preserve the author's tone and intent, but express it with the full richness of Russian — use varied vocabulary, expressive word order, and natural collocations.
 9. Maintain paragraph structure from the original, except where dialogue must be reformatted per rule 5.
 10. Adapt idioms and culturally-specific expressions so they feel organic in Russian. Do NOT invent or add content that isn't in the original.
 11. Do NOT add translator's notes, explanations, or commentary.
 12. Do NOT skip or summarize any part of the text.
-13. The source text may contain HTML formatting tags: <b>bold</b>, <i>italic</i>, <b><i>bold italic</i></b>. You MUST preserve these tags exactly in your translation, wrapping the corresponding translated words. Never add, remove, or alter these tags. Keep the same nesting order.
-
-IMPORTANT: If you receive context from a previous translation chunk (marked as [CONTEXT FROM PREVIOUS CHUNK]), use it ONLY to maintain consistency in tone, style, character names, and narrative flow. Do NOT re-translate the context — translate ONLY the new text that follows after the context block."""
+13. The source text may contain HTML formatting tags: <b>bold</b>, <i>italic</i>, <b><i>bold italic</i></b>. You MUST preserve these tags exactly in your translation, wrapping the corresponding translated words. Never add, remove, or alter these tags. Keep the same nesting order."""
 
 
 # ─────────────────────────── GLOSSARY ───────────────────────────
@@ -138,20 +149,35 @@ def filter_glossary_for_chunk(glossary: dict[str, str], chunk: str) -> dict[str,
     }
 
 
-def build_system_prompt(glossary: dict[str, str]) -> str:
-    """Build system prompt, appending glossary if provided."""
-    if not glossary:
-        return SYSTEM_PROMPT_BASE
+def _strip_glossary_annotation(value: str) -> str:
+    """Strip gender/indeclinability annotations from glossary values.
+    E.g., 'Нищий [m, indeclinable]' -> 'Нищий'"""
+    return re.sub(r"\s*\[.*?\]\s*$", "", value).strip()
 
-    glossary_lines = "\n".join(f"  {eng} → {rus}" for eng, rus in glossary.items())
+
+def glossary_to_terms(glossary: dict[str, str]) -> list[dict[str, str]]:
+    """Convert flat glossary dict to QWEN-MT terms format.
+    Strips annotations — terms only accept clean source/target pairs."""
+    terms = []
+    for source, target in glossary.items():
+        clean_target = _strip_glossary_annotation(target)
+        if source and clean_target:
+            terms.append({"source": source, "target": clean_target})
+    return terms
+
+
+def build_glossary_note(glossary: dict[str, str]) -> str:
+    """Build a glossary note with gender annotations for the user message.
+    Only includes entries that have annotations (character names with gender)."""
+    if not glossary:
+        return ""
+    annotated = {k: v for k, v in glossary.items() if "[" in v}
+    if not annotated:
+        return ""
+    lines = "\n".join(f"  {eng} -> {rus}" for eng, rus in annotated.items())
     return (
-        SYSTEM_PROMPT_BASE
-        + "\n\nMANDATORY GLOSSARY — always use these exact translations.\n"
-        + "Gender annotations [m], [f] indicate the character's gender for correct Russian "
-        + "adjective/verb agreement. [indeclinable] means the name does NOT change by "
-        + "grammatical case in Russian (e.g., keep 'Элис' as 'Элис' in all cases).\n"
-        + "Names without [indeclinable] MUST be declined normally by Russian grammar rules.\n"
-        + glossary_lines
+        "\n[CHARACTER NAMES — gender info for correct Russian agreement:]\n"
+        + lines
     )
 
 
@@ -160,7 +186,7 @@ def build_system_prompt(glossary: dict[str, str]) -> str:
 
 def _docx_para_to_tuples(para) -> list[tuple[str, bool, bool]]:
     """Extract (text, bold, italic) tuples from a python-docx paragraph.
-    Resolves formatting through run → character style → paragraph style hierarchy."""
+    Resolves formatting through run -> character style -> paragraph style hierarchy."""
     # Resolve paragraph-style defaults by walking the style chain
     style_bold = False
     style_italic = False
@@ -308,7 +334,7 @@ def _merge_and_mark_runs(runs: list[tuple[str, bool, bool]]) -> str:
 
 def _markdown_to_html_formatting(text: str) -> str:
     """Convert markdown bold/italic markers to HTML tags.
-    Process order: bold-italic (***) → bold (**) → italic (*).
+    Process order: bold-italic (***) -> bold (**) -> italic (*).
     After each step the matched markers are gone, so later steps won't mis-match."""
     text = re.sub(r"\*{3}(.+?)\*{3}", r"<b><i>\1</i></b>", text)
     text = re.sub(r"\*{2}(.+?)\*{2}", r"<b>\1</b>", text)
@@ -372,14 +398,14 @@ def extract_from_docx(filepath: str) -> str:
         for s in samples:
             log.debug("Format sample: %.300s", s)
     elif paragraphs:
-        log.warning("No formatting tags detected in docx — the source may not have bold/italic, or styles are not resolved")
+        log.warning("No formatting tags detected in docx")
     return "\n\n".join(paragraphs)
 
 
 def extract_from_epub(filepath: str) -> str:
     """Extract text from .epub preserving paragraph breaks and formatting."""
     if ebooklib is None:
-        sys.exit("Для .epub нужны библиотеки: pip install ebooklib beautifulsoup4 lxml")
+        sys.exit("For .epub: pip install ebooklib beautifulsoup4 lxml")
 
     book = epub.read_epub(filepath, options={"ignore_ncx": True})
     bold_classes, italic_classes = _parse_epub_css(book)
@@ -409,7 +435,7 @@ def extract_from_epub(filepath: str) -> str:
         for s in samples:
             log.debug("Format sample: %.300s", s)
     elif full_text:
-        log.warning("No formatting tags detected in epub — CSS classes may not match, or source has no bold/italic")
+        log.warning("No formatting tags detected in epub")
     return "\n\n".join(full_text)
 
 
@@ -440,7 +466,7 @@ def extract_from_md(filepath: str) -> str:
         for s in samples:
             log.debug("Format sample: %.300s", s)
     elif paragraphs:
-        log.warning("No formatting tags found in markdown file — check that the source has *italic* or **bold** markers")
+        log.warning("No formatting tags found in markdown file")
     return "\n\n".join(paragraphs)
 
 
@@ -454,7 +480,7 @@ def extract_text(filepath: str) -> str:
     elif ext in (".md", ".txt"):
         return extract_from_md(filepath)
     else:
-        sys.exit(f"Неподдерживаемый формат: {ext}. Нужен .docx, .epub, .md или .txt")
+        sys.exit(f"Unsupported format: {ext}. Need .docx, .epub, .md or .txt")
 
 
 # ─────────────────────────── CHUNKING ───────────────────────────
@@ -509,17 +535,39 @@ def get_tail_paragraphs(text: str, n: int = CONTEXT_PARAGRAPHS) -> str:
     return "\n\n".join(tail)
 
 
-def build_user_message(chunk: str, previous_translation: str | None) -> str:
-    """Build the user message with optional context from previous chunk."""
+def build_user_message(
+    chunk: str,
+    previous_translation: str | None,
+    glossary_note: str = "",
+    context_paragraphs: int = CONTEXT_PARAGRAPHS,
+) -> str:
+    """Build the user message for QWEN-MT.
+    Since QWEN-MT doesn't support system messages, translation instructions
+    are prepended to the user message with clear delimiters."""
+    parts = []
+
+    # Instructions block
+    parts.append(
+        "[TRANSLATION INSTRUCTIONS — follow these rules, do NOT translate this section:]\n"
+        + TRANSLATION_INSTRUCTIONS
+    )
+
+    # Gender annotations for character names (supplements the terms parameter)
+    if glossary_note:
+        parts.append(glossary_note)
+
+    # Context from previous translation
     if previous_translation:
-        context = get_tail_paragraphs(previous_translation)
-        return (
-            f"[CONTEXT FROM PREVIOUS CHUNK — do NOT re-translate this, use only for continuity:]\n"
-            f"{context}\n\n"
-            f"[NEW TEXT TO TRANSLATE:]\n"
-            f"{chunk}"
+        context = get_tail_paragraphs(previous_translation, context_paragraphs)
+        parts.append(
+            "\n[CONTEXT FROM PREVIOUS CHUNK — do NOT re-translate, use only for continuity:]\n"
+            + context
         )
-    return chunk
+
+    # The actual text to translate
+    parts.append(f"\n[TEXT TO TRANSLATE:]\n{chunk}")
+
+    return "\n".join(parts)
 
 
 # ─────────────────────────── TRANSLATION ───────────────────────────
@@ -534,12 +582,12 @@ def _log_format_tags(source: str, result: str, chunk_num: int, total: int):
     out_b = result.count("<b>")
     out_i = result.count("<i>")
     log.info(
-        "Chunk %d/%d format tags: <b> %d→%d, <i> %d→%d",
+        "Chunk %d/%d format tags: <b> %d->%d, <i> %d->%d",
         chunk_num, total, in_b, out_b, in_i, out_i,
     )
     if out_b < in_b or out_i < in_i:
         log.warning(
-            "Chunk %d/%d: formatting tags LOST (%d+%d → %d+%d)!",
+            "Chunk %d/%d: formatting tags LOST (%d+%d -> %d+%d)!",
             chunk_num, total, in_b, in_i, out_b, out_i,
         )
 
@@ -550,40 +598,52 @@ def translate_chunk(
     chunk_num: int,
     total: int,
     previous_translation: str | None = None,
-    reasoning_effort: str | None = None,
     glossary: dict[str, str] | None = None,
+    context_paragraphs: int = CONTEXT_PARAGRAPHS,
+    model: str = MODEL,
 ) -> str:
-    """Translate a single chunk via GPT-5.2."""
+    """Translate a single chunk via QWEN-MT.
+    Uses translation_options.terms for glossary and instructions in user message."""
     has_context = previous_translation is not None
     ctx_label = " +ctx" if has_context else ""
     log.info("Translating chunk %d/%d (%d chars%s)", chunk_num, total, len(chunk), ctx_label)
     print(
-        f"  📝 Перевожу чанк {chunk_num}/{total} ({len(chunk)} символов{ctx_label})...",
+        f"  Translating chunk {chunk_num}/{total} ({len(chunk)} chars{ctx_label})...",
         end=" ",
         flush=True,
     )
 
-    user_message = build_user_message(chunk, previous_translation)
-
     chunk_glossary = filter_glossary_for_chunk(glossary or {}, chunk)
+    terms = glossary_to_terms(chunk_glossary)
+    glossary_note = build_glossary_note(chunk_glossary)
+
     if glossary and chunk_glossary:
         log.debug(
-            "Chunk %d/%d: using %d/%d glossary entries",
-            chunk_num, total, len(chunk_glossary), len(glossary),
+            "Chunk %d/%d: using %d/%d glossary entries (%d terms)",
+            chunk_num, total, len(chunk_glossary), len(glossary), len(terms),
         )
 
-    kwargs = dict(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": build_system_prompt(chunk_glossary)},
-            {"role": "user", "content": user_message},
-        ],
+    user_message = build_user_message(
+        chunk, previous_translation, glossary_note, context_paragraphs,
     )
 
-    if reasoning_effort:
-        kwargs["reasoning_effort"] = reasoning_effort
-    else:
-        kwargs["temperature"] = TEMPERATURE
+    translation_options = {
+        "source_lang": "English",
+        "target_lang": "Russian",
+    }
+    if terms:
+        translation_options["terms"] = terms
+
+    kwargs = dict(
+        model=model,
+        messages=[
+            {"role": "user", "content": user_message},
+        ],
+        temperature=TEMPERATURE,
+        extra_body={
+            "translation_options": translation_options,
+        },
+    )
 
     def _call():
         response = client.chat.completions.create(**kwargs)
@@ -593,31 +653,31 @@ def translate_chunk(
 
     try:
         result, tokens_used = _call()
-        print(f"✅ (токенов: {tokens_used})")
+        print(f"OK (tokens: {tokens_used})")
         log.info("Chunk %d/%d done: %s tokens, %d chars out", chunk_num, total, tokens_used, len(result))
         _log_format_tags(chunk, result, chunk_num, total)
         return result
 
     except Exception as e:
         log.error("Chunk %d/%d failed: %s", chunk_num, total, e)
-        print(f"❌ Ошибка: {e}")
-        print(f"  🔄 Повторная попытка через 10 секунд...")
+        print(f"FAIL: {e}")
+        print(f"  Retrying in 10 seconds...")
         time.sleep(10)
         try:
             result, tokens_used = _call()
-            print(f"  ✅ Повторная попытка успешна! (токенов: {tokens_used})")
+            print(f"  Retry OK! (tokens: {tokens_used})")
             log.info("Chunk %d/%d retry OK: %s tokens", chunk_num, total, tokens_used)
             _log_format_tags(chunk, result, chunk_num, total)
             return result
         except Exception as e2:
             log.error("Chunk %d/%d retry also failed: %s", chunk_num, total, e2)
-            print(f"  ❌ Повторная ошибка: {e2}")
-            return f"[ОШИБКА ПЕРЕВОДА ЧАНКА {chunk_num}: {e2}]"
+            print(f"  Retry also failed: {e2}")
+            return f"[TRANSLATION ERROR CHUNK {chunk_num}: {e2}]"
 
 
 # ─────────────────────────── FORMATTING TRANSFER (PASS 2) ───────────────────────────
 
-FORMATTING_TRANSFER_PROMPT = """You are a formatting transfer tool. You receive:
+FORMATTING_TRANSFER_INSTRUCTIONS = """You are a formatting transfer tool. You receive:
 1. An original English text with HTML formatting tags (<b> for bold, <i> for italic)
 2. A Russian translation of the same text WITHOUT formatting tags
 
@@ -637,19 +697,26 @@ def transfer_formatting(
     translated_plain: str,
     chunk_num: int,
     total: int,
+    model: str = MODEL,
 ) -> str:
     """Pass 2: Transfer formatting from original English to translated Russian.
-    Uses a separate focused GPT call with low temperature for precise tag placement."""
+    Uses a separate QWEN-MT call with low temperature for precise tag placement.
+
+    NOTE: QWEN-MT is a translation model, not a general LLM. Formatting transfer
+    is NOT a translation task, so results may vary. If quality is poor, consider
+    using a general LLM (GPT, Qwen-chat) for this pass instead."""
     in_b = original_tagged.count("<b>")
     in_i = original_tagged.count("<i>")
     print(
-        f"  🎨 Форматирование чанка {chunk_num}/{total} ({in_b} bold, {in_i} italic)...",
+        f"  Formatting chunk {chunk_num}/{total} ({in_b} bold, {in_i} italic)...",
         end=" ", flush=True,
     )
     log.info("Format transfer chunk %d/%d: %d <b>, %d <i> to transfer",
              chunk_num, total, in_b, in_i)
 
     user_message = (
+        f"[INSTRUCTION — do NOT translate, follow these rules:]\n"
+        f"{FORMATTING_TRANSFER_INSTRUCTIONS}\n\n"
         f"[ORIGINAL ENGLISH TEXT WITH FORMATTING TAGS:]\n"
         f"{original_tagged}\n\n"
         f"[RUSSIAN TRANSLATION — add formatting tags to this text:]\n"
@@ -658,20 +725,25 @@ def transfer_formatting(
 
     try:
         response = client.chat.completions.create(
-            model=MODEL,
+            model=model,
             temperature=0.1,
             messages=[
-                {"role": "system", "content": FORMATTING_TRANSFER_PROMPT},
                 {"role": "user", "content": user_message},
             ],
+            extra_body={
+                "translation_options": {
+                    "source_lang": "English",
+                    "target_lang": "Russian",
+                },
+            },
         )
         result = response.choices[0].message.content.strip()
         tokens = response.usage.total_tokens if response.usage else "?"
 
         out_b = result.count("<b>")
         out_i = result.count("<i>")
-        print(f"✅ (<b> {in_b}→{out_b}, <i> {in_i}→{out_i}, {tokens} tok)")
-        log.info("Format transfer chunk %d/%d done: <b> %d→%d, <i> %d→%d, %s tokens",
+        print(f"OK (<b> {in_b}->{out_b}, <i> {in_i}->{out_i}, {tokens} tok)")
+        log.info("Format transfer chunk %d/%d done: <b> %d->%d, <i> %d->%d, %s tokens",
                  chunk_num, total, in_b, out_b, in_i, out_i, tokens)
 
         # Sanity check: if zero tags came back, transfer failed — keep plain version
@@ -692,7 +764,7 @@ def transfer_formatting(
 
     except Exception as e:
         log.error("Format transfer failed for chunk %d/%d: %s", chunk_num, total, e)
-        print(f"⚠️ ({e}), пропускаю")
+        print(f"WARNING ({e}), skipping")
         return translated_plain  # Fallback: unformatted translation is better than nothing
 
 
@@ -702,7 +774,7 @@ def transfer_formatting(
 def _cache_path(input_path: str) -> str:
     """Get cache file path for a given input file."""
     stem = Path(input_path).stem
-    return str(Path(input_path).parent / f".{stem}_translation_cache.json")
+    return str(Path(input_path).parent / f".{stem}_qwen_translation_cache.json")
 
 
 def save_translation_cache(
@@ -719,7 +791,7 @@ def save_translation_cache(
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, cache_file)
-    log.debug("Cache saved: %d/%d chunks → %s", len(translated), total_chunks, cache_file)
+    log.debug("Cache saved: %d/%d chunks -> %s", len(translated), total_chunks, cache_file)
 
 
 def load_translation_cache(cache_file: str) -> dict | None:
@@ -809,7 +881,7 @@ def save_to_docx(translated_chunks: list[str], output_path: str):
 
     doc.save(output_path)
     log.info("Saved %s", output_path)
-    print(f"\n💾 Сохранено: {output_path}")
+    print(f"\nSaved: {output_path}")
 
 
 # ─────────────────────────── MAIN ───────────────────────────
@@ -817,126 +889,134 @@ def save_to_docx(translated_chunks: list[str], output_path: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="English → Russian Literary Translator",
+        description="English -> Russian Literary Translator (QWEN-MT)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Примеры:
-  python3 eng_translator.py book.docx
-  python3 eng_translator.py book.epub -o перевод.docx
-  python3 eng_translator.py book.md -o перевод.docx
-  python3 eng_translator.py book.docx --reasoning medium
-  python3 eng_translator.py book.docx --chunk-size 5000 --context 5
-  python3 eng_translator.py book.docx --glossary glossary.json
-  python3 eng_translator.py book.docx --resume
+Examples:
+  python3 eng_translator_qwen.py book.docx
+  python3 eng_translator_qwen.py book.epub -o translation.docx
+  python3 eng_translator_qwen.py book.md -o translation.docx
+  python3 eng_translator_qwen.py book.docx --model qwen-mt-flash
+  python3 eng_translator_qwen.py book.docx --chunk-size 3000 --context 5
+  python3 eng_translator_qwen.py book.docx --glossary glossary.json
+  python3 eng_translator_qwen.py book.docx --resume
         """,
     )
-    parser.add_argument("input", help="Путь к .epub, .docx, .md или .txt файлу")
+    parser.add_argument("input", help="Path to .epub, .docx, .md or .txt file")
     parser.add_argument(
-        "-o", "--output", help="Путь к выходному .docx (по умолчанию: input_translated.docx)"
+        "-o", "--output", help="Output .docx path (default: input_translated_qwen.docx)"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=MODEL,
+        choices=["qwen-mt-plus", "qwen-mt-flash", "qwen-mt-lite", "qwen-mt-turbo"],
+        help=f"QWEN-MT model (default: {MODEL}). "
+             "plus = highest quality, flash = balanced, lite = fastest (31 lang), "
+             "turbo = deprecated (use flash)",
     )
     parser.add_argument(
         "--chunk-size",
         type=int,
         default=MAX_CHARS_PER_CHUNK,
-        help=f"Макс. символов на чанк (по умолчанию: {MAX_CHARS_PER_CHUNK})",
+        help=f"Max chars per chunk (default: {MAX_CHARS_PER_CHUNK}). "
+             "Note: QWEN-MT has 8192 token input limit",
     )
     parser.add_argument(
         "--context",
         type=int,
         default=CONTEXT_PARAGRAPHS,
-        help=f"Кол-во абзацев из предыдущего перевода для контекста (по умолчанию: {CONTEXT_PARAGRAPHS}, 0 = отключить)",
+        help=f"Paragraphs from previous translation for context (default: {CONTEXT_PARAGRAPHS}, 0 = disable)",
     )
     parser.add_argument(
         "--delay",
         type=float,
         default=DELAY_BETWEEN_REQUESTS,
-        help=f"Пауза между запросами в секундах (по умолчанию: {DELAY_BETWEEN_REQUESTS})",
-    )
-    parser.add_argument(
-        "--reasoning",
-        type=str,
-        default=REASONING_EFFORT,
-        choices=["none", "low", "medium", "high", "xhigh"],
-        help="Уровень reasoning (по умолчанию: отключён)",
+        help=f"Delay between requests in seconds (default: {DELAY_BETWEEN_REQUESTS})",
     )
     parser.add_argument(
         "--glossary",
         type=str,
         default=None,
-        help="Путь к JSON-файлу со словарём (по умолчанию: отключён)",
+        help="Path to glossary JSON file",
     )
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Возобновить перевод из кэша (если предыдущий запуск был прерван)",
+        help="Resume translation from cache (if previous run was interrupted)",
     )
 
     args = parser.parse_args()
 
     if not os.path.isfile(args.input):
-        sys.exit(f"Файл не найден: {args.input}")
+        sys.exit(f"File not found: {args.input}")
+
+    # Selected model
+    selected_model = args.model
 
     # Output path
     if args.output:
         output_path = args.output
     else:
         stem = Path(args.input).stem
-        output_path = f"{stem}_translated.docx"
+        output_path = f"{stem}_translated_qwen.docx"
 
     # Glossary
     glossary = {}
     if args.glossary:
         if not os.path.isfile(args.glossary):
-            sys.exit(f"Словарь не найден: {args.glossary}")
+            sys.exit(f"Glossary not found: {args.glossary}")
         glossary = load_glossary(args.glossary)
-        print(f"📚 Словарь загружен: {len(glossary)} терминов")
-
-    # Reasoning effort
-    reasoning = args.reasoning if args.reasoning and args.reasoning != "none" else None
+        print(f"Glossary loaded: {len(glossary)} entries")
 
     # Extract
-    print(f"📖 Читаю файл: {args.input}")
+    print(f"Reading file: {args.input}")
     text = extract_text(args.input)
-    print(f"   Извлечено {len(text)} символов")
+    print(f"   Extracted {len(text)} characters")
 
     if not text.strip():
-        sys.exit("Файл пуст или не удалось извлечь текст.")
+        sys.exit("File is empty or text extraction failed.")
 
     # Chunk
     chunks = split_into_chunks(text, max_chars=args.chunk_size)
-    print(f"✂️  Разбито на {len(chunks)} чанков (макс. {args.chunk_size} символов)")
-    print(f"📎 Контекст: {args.context} абзацев из предыдущего перевода")
-    if reasoning:
-        print(f"🧠 Reasoning: {reasoning}")
+    print(f"Split into {len(chunks)} chunks (max {args.chunk_size} chars)")
+    print(f"Context: {args.context} paragraphs from previous translation")
+    print(f"Model: {selected_model}")
     print()
 
-    # Estimate cost (rough)
+    # Estimate cost (rough — QWEN-MT pricing varies by model)
     estimated_input_tokens = len(text) * 0.8
+    # Instructions add ~500 tokens per chunk
+    estimated_input_tokens += len(chunks) * 500
     if args.context > 0:
         estimated_input_tokens *= 1.15
-    estimated_output_tokens = estimated_input_tokens * 1.5
-    estimated_cost = (estimated_input_tokens * 2.50 + estimated_output_tokens * 10) / 1_000_000
-    if reasoning:
-        multiplier = {"low": 1.3, "medium": 1.8, "high": 2.5, "xhigh": 4.0}[reasoning]
-        estimated_cost *= multiplier
+    estimated_output_tokens = len(text) * 0.8 * 1.5
 
-    print(f"💰 Примерная стоимость: ${estimated_cost:.3f}")
+    # QWEN-MT pricing (Global deployment, per 1M tokens)
+    price_map = {
+        "qwen-mt-plus": (0.259, 0.775),
+        "qwen-mt-flash": (0.101, 0.280),
+        "qwen-mt-lite": (0.086, 0.229),
+        "qwen-mt-turbo": (0.101, 0.280),  # deprecated, same as flash
+    }
+    in_price, out_price = price_map.get(selected_model, (0.50, 2.00))
+    estimated_cost = (estimated_input_tokens * in_price + estimated_output_tokens * out_price) / 1_000_000
+
+    print(f"Estimated cost: ${estimated_cost:.3f} (approximate)")
     print(f"   (input ~{estimated_input_tokens:.0f} tokens, output ~{estimated_output_tokens:.0f} tokens)")
-    if reasoning:
-        multiplier = {"low": 1.3, "medium": 1.8, "high": 2.5, "xhigh": 4.0}[reasoning]
-        print(f"   (с учётом reasoning-наценки ×{multiplier})")
+    print(f"   (QWEN-MT pricing is approximate, check DashScope for exact rates)")
     print()
 
-    confirm = input("Продолжить? [Y/n]: ").strip().lower()
+    confirm = input("Continue? [Y/n]: ").strip().lower()
     if confirm == "n":
-        sys.exit("Отменено.")
+        sys.exit("Cancelled.")
 
     # Cache setup
     cache_file = _cache_path(args.input)
-    cache_meta = {"input": args.input, "model": MODEL, "chunk_size": args.chunk_size}
+    cache_meta = {"input": args.input, "model": selected_model, "chunk_size": args.chunk_size}
 
     # Translate
-    client = OpenAI(api_key=API_KEY)
+    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
     translated = []
     start_chunk = 1
 
@@ -946,37 +1026,33 @@ def main():
         if cache and cache.get("completed", 0) > 0:
             translated = cache["translated"]
             start_chunk = len(translated) + 1
-            print(f"🔄 Возобновление из кэша: {len(translated)}/{len(chunks)} чанков уже переведено")
+            print(f"Resuming from cache: {len(translated)}/{len(chunks)} chunks already translated")
             log.info("Resumed from cache: %d/%d chunks", len(translated), len(chunks))
         else:
-            print("⚠️  Кэш не найден или пуст, начинаю с начала")
+            print("No valid cache found, starting from scratch")
             log.info("No valid cache found, starting from scratch")
 
     for i in range(start_chunk, len(chunks) + 1):
-        chunk_tagged = chunks[i - 1]
-        chunk_clean = _strip_html_tags(chunk_tagged)
-        has_formatting = "<b>" in chunk_tagged or "<i>" in chunk_tagged
+        chunk = chunks[i - 1]
 
         prev = None
         if args.context > 0 and translated:
-            # Strip tags from context so Pass 1 sees clean text
-            prev = _strip_html_tags(translated[-1])
+            prev = translated[-1]
 
-        # Pass 1: translate clean text (no formatting markers)
+        # Single pass: translate with formatting tags included
+        # QWEN-MT is a pure translation model — it cannot follow formatting
+        # transfer instructions (Pass 2). Instead, we send text WITH tags
+        # and rely on rule 13 in TRANSLATION_INSTRUCTIONS to preserve them.
         result = translate_chunk(
             client,
-            chunk_clean,
+            chunk,
             i,
             len(chunks),
             previous_translation=prev,
-            reasoning_effort=reasoning,
             glossary=glossary,
+            context_paragraphs=args.context,
+            model=selected_model,
         )
-
-        # Pass 2: transfer formatting from original (only if source had tags)
-        if has_formatting:
-            time.sleep(args.delay)
-            result = transfer_formatting(client, chunk_tagged, result, i, len(chunks))
 
         translated.append(result)
 
@@ -998,16 +1074,15 @@ def main():
     # Summary
     total_chars_in = sum(len(c) for c in chunks)
     total_chars_out = sum(len(c) for c in translated)
-    print(f"\n📊 Итого:")
-    print(f"   Исходный текст: {total_chars_in:,} символов")
-    print(f"   Перевод:        {total_chars_out:,} символов")
-    print(f"   Чанков:         {len(chunks)}")
-    print(f"   Контекст:       {args.context} абзацев между чанками")
+    print(f"\nSummary:")
+    print(f"   Source text:  {total_chars_in:,} characters")
+    print(f"   Translation:  {total_chars_out:,} characters")
+    print(f"   Chunks:       {len(chunks)}")
+    print(f"   Context:      {args.context} paragraphs between chunks")
+    print(f"   Model:        {selected_model}")
     if glossary:
-        print(f"   Словарь:        {len(glossary)} терминов")
-    if reasoning:
-        print(f"   Reasoning:      {reasoning}")
-    print(f"   Файл:           {output_path}")
+        print(f"   Glossary:     {len(glossary)} entries")
+    print(f"   File:         {output_path}")
 
 
 if __name__ == "__main__":
