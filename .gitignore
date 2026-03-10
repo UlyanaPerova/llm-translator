@@ -1,6 +1,18 @@
 .env
 .DS_Store
 screenshots/
-.docx
 *.log
 chapters.txt
+
+# Папки
+old/
+logs/
+__pycache__/
+.claude/worktrees/
+
+# Файлы
+*.docx
+*.json
+*_cache.json
+*.epub
+~$*
