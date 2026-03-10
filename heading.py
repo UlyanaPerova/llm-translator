@@ -8,7 +8,7 @@ import logging
 setup_logger()
 log = logging.getLogger("heading") 
 
-doc = Document("chapters_5_36_rus_1.docx")
+doc = Document("ERROR_Метаморфоза.docx")
 
 pattern = re.compile(r"^глава\s+\d+", re.IGNORECASE)
 
@@ -20,4 +20,4 @@ for para in doc.paragraphs:
         page_break = OxmlElement("w:pageBreakBefore")
         pPr.append(page_break)
 
-doc.save("chapters_5_36_rus_1_с_оглавлением.docx")
+doc.save("ERROR_Метаморфоза_с_оглавлением.docx")

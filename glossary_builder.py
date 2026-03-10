@@ -84,11 +84,11 @@ Guidelines:
 - If no entities of a category are found, return an empty list for that category.
 - Do NOT invent entities. Only extract what is explicitly present in the text."""
 
-CONSOLIDATION_SYSTEM_PROMPT = """You are a literary glossary editor. You will receive a raw aggregated glossary extracted
-from multiple chunks of a novel. Your task is to:
+CONSOLIDATION_PROMPT_CHARACTERS = """You are a literary glossary editor. You will receive a raw list of CHARACTER entries
+extracted from multiple chunks of a novel. Your task is to:
 
-1. DEDUPLICATE: Merge entries that refer to the same entity (same name, different casing,
-   or one is an alias of another). Combine their notes and aliases.
+1. DEDUPLICATE: Merge entries that refer to the same character (same name, different casing,
+   or one is an alias/nickname of another). Combine their notes and aliases.
 2. RESOLVE CONFLICTS: If gender was "unknown" in some chunks but identified in others,
    use the identified gender. If translations differ, pick the most consistent one and
    put alternatives into the "alternatives" field.
@@ -96,7 +96,7 @@ from multiple chunks of a novel. Your task is to:
 4. MERGE ALIASES: If "Paw" and "Pawarit" refer to the same character, keep one entry
    with aliases.
 
-Return the consolidated glossary as JSON with this structure:
+Return ONLY a JSON object with a single key "characters" containing the consolidated list:
 {
   "characters": [
     {
@@ -108,7 +108,21 @@ Return the consolidated glossary as JSON with this structure:
       "alternatives": [],
       "notes": "combined context"
     }
-  ],
+  ]
+}
+
+Sort entries alphabetically by "original". Do NOT omit any characters."""
+
+CONSOLIDATION_PROMPT_TERMS = """You are a literary glossary editor. You will receive a raw list of TERM entries
+(magic systems, ranks, titles, organizations, items, creatures) extracted from multiple chunks of a novel.
+
+Your task is to:
+1. DEDUPLICATE: Merge entries that refer to the same term. Combine notes.
+2. RESOLVE CONFLICTS: If translations differ, pick the best one and put alternatives into "alternatives".
+3. STANDARDIZE: Ensure consistent Russian translations.
+
+Return ONLY a JSON object with a single key "terms" containing the consolidated list:
+{
   "terms": [
     {
       "original": "Term",
@@ -117,7 +131,21 @@ Return the consolidated glossary as JSON with this structure:
       "alternatives": [],
       "notes": "combined context"
     }
-  ],
+  ]
+}
+
+Sort entries alphabetically by "original". Do NOT omit any terms."""
+
+CONSOLIDATION_PROMPT_LOCATIONS = """You are a literary glossary editor. You will receive a raw list of LOCATION entries
+extracted from multiple chunks of a novel.
+
+Your task is to:
+1. DEDUPLICATE: Merge entries that refer to the same place. Combine notes.
+2. RESOLVE CONFLICTS: If translations differ, pick the best one and put alternatives into "alternatives".
+3. STANDARDIZE: Ensure consistent Russian transliterations/translations.
+
+Return ONLY a JSON object with a single key "locations" containing the consolidated list:
+{
   "locations": [
     {
       "original": "Place",
@@ -128,7 +156,7 @@ Return the consolidated glossary as JSON with this structure:
   ]
 }
 
-Sort all entries alphabetically by "original" within each category."""
+Sort entries alphabetically by "original". Do NOT omit any locations."""
 
 # ─────────────────────────── API CALL WITH RETRY ───────────────────────────
 
@@ -138,6 +166,7 @@ def call_gpt_json(
     messages: list[dict],
     temperature: float = TEMPERATURE_EXTRACT,
     max_retries: int = MAX_RETRIES,
+    max_output_tokens: int = 16000,
 ) -> tuple[dict | None, int]:
     """
     Call GPT expecting a JSON response. Retries with exponential backoff.
@@ -150,11 +179,28 @@ def call_gpt_json(
                 messages=messages,
                 temperature=temperature,
                 response_format={"type": "json_object"},
+                max_completion_tokens=max_output_tokens,
             )
+            finish_reason = response.choices[0].finish_reason
+            if finish_reason == "length":
+                log.warning(
+                    "GPT output truncated (hit token limit, attempt %d/%d)",
+                    attempt,
+                    max_retries,
+                )
+                if attempt < max_retries:
+                    # retry with higher limit
+                    max_output_tokens = min(max_output_tokens * 2, 64000)
+                    log.info("Retrying with max_output_tokens=%d", max_output_tokens)
+                    continue
+                else:
+                    log.error("Output still truncated after %d attempts", max_retries)
+                    return None, 0
+
             content = response.choices[0].message.content.strip()
             result = json.loads(content)
             tokens = response.usage.total_tokens if response.usage else 0
-            log.debug("GPT response: %d tokens", tokens)
+            log.debug("GPT response: %d tokens, finish_reason=%s", tokens, finish_reason)
             return result, tokens
 
         except json.JSONDecodeError as e:
@@ -336,60 +382,195 @@ def aggregate_raw_results(results: list[dict]) -> dict:
 # ─────────────────────────── PHASE 2: CONSOLIDATION ───────────────────────────
 
 
-def consolidate_glossary(client: OpenAI, aggregated: dict) -> dict:
-    """Send aggregated raw results to GPT for final consolidation."""
-    entity_count = (
-        len(aggregated["characters"])
-        + len(aggregated["terms"])
-        + len(aggregated["locations"])
-    )
-    log.info("Consolidating %d total entities via GPT...", entity_count)
-    print(f"\nConsolidating {entity_count} entities via GPT...", end=" ", flush=True)
+CONSOLIDATION_BATCH_SIZE = 50
 
+
+def _consolidate_batch(
+    client: OpenAI, category: str, entries: list[dict], system_prompt: str,
+    batch_label: str = "",
+) -> tuple[list[dict] | None, int]:
+    """Consolidate a single batch of entries. Returns (entries, tokens) or (None, 0)."""
     messages = [
-        {"role": "system", "content": CONSOLIDATION_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
-            "content": json.dumps(aggregated, ensure_ascii=False, indent=2),
+            "content": json.dumps(entries, ensure_ascii=False, indent=2),
         },
     ]
 
     result, tokens = call_gpt_json(
         client, messages, temperature=TEMPERATURE_CONSOLIDATE
     )
-    if result is None:
-        print("FAIL (using local aggregation)")
-        log.warning("Consolidation failed, using locally aggregated results")
-        return _finalize_aggregated(aggregated)
 
-    for key in ("characters", "terms", "locations"):
-        if key not in result:
-            result[key] = []
-        result[key] = sorted(
-            result[key], key=lambda x: x.get("original", "").lower()
+    if result is None:
+        return None, 0
+
+    consolidated = result.get(category, [])
+    if not consolidated and entries:
+        log.warning(
+            "GPT returned empty %s%s but had %d entries",
+            category,
+            batch_label,
+            len(entries),
+        )
+        return None, tokens
+
+    # Validate: warn if GPT dropped entries
+    if len(consolidated) < len(entries) * 0.5:
+        log.warning(
+            "GPT %s%s: input %d entries, output %d (lost >50%%, likely truncated)",
+            category,
+            batch_label,
+            len(entries),
+            len(consolidated),
         )
 
-    chars = len(result["characters"])
-    terms = len(result["terms"])
-    locs = len(result["locations"])
-    print(f"OK ({chars}ch, {terms}t, {locs}l, {tokens} tok)")
+    return consolidated, tokens
+
+
+def _consolidate_category(
+    client: OpenAI, category: str, entries: list[dict], system_prompt: str
+) -> list[dict]:
+    """Consolidate a single category via GPT. Splits into batches if needed."""
+    if not entries:
+        return []
+
+    log.info("Consolidating %d %s entries...", len(entries), category)
+
+    # Small enough — single call
+    if len(entries) <= CONSOLIDATION_BATCH_SIZE:
+        print(f"  {category}: {len(entries)} entries...", end=" ", flush=True)
+        consolidated, tokens = _consolidate_batch(client, category, entries, system_prompt)
+        if consolidated is None:
+            print("FAIL (keeping local)")
+            log.warning("Consolidation failed for %s, using local aggregation", category)
+            return None
+        consolidated = sorted(consolidated, key=lambda x: x.get("original", "").lower())
+        print(f"OK ({len(consolidated)}, {tokens} tok)")
+        log.info("Consolidated %s: %d entries (%d tokens)", category, len(consolidated), tokens)
+        return consolidated
+
+    # Large category — split into batches
+    batches = [
+        entries[i : i + CONSOLIDATION_BATCH_SIZE]
+        for i in range(0, len(entries), CONSOLIDATION_BATCH_SIZE)
+    ]
+    print(f"  {category}: {len(entries)} entries in {len(batches)} batches...")
+
+    all_consolidated = []
+    total_tokens = 0
+    failed_batches = 0
+
+    for batch_idx, batch in enumerate(batches, 1):
+        batch_label = f" batch {batch_idx}/{len(batches)}"
+        print(f"    batch {batch_idx}/{len(batches)} ({len(batch)} entries)...", end=" ", flush=True)
+
+        consolidated, tokens = _consolidate_batch(
+            client, category, batch, system_prompt, batch_label
+        )
+        total_tokens += tokens
+
+        if consolidated is not None:
+            all_consolidated.extend(consolidated)
+            print(f"OK ({len(consolidated)}, {tokens} tok)")
+        else:
+            # Fallback: keep original batch entries with suggested_translation renamed
+            for entry in batch:
+                if "suggested_translation" in entry:
+                    entry["translation"] = entry.pop("suggested_translation")
+            all_consolidated.extend(batch)
+            failed_batches += 1
+            print(f"FAIL (keeping {len(batch)} local)")
+
+        if batch_idx < len(batches):
+            time.sleep(DELAY_BETWEEN_REQUESTS)
+
+    if failed_batches > 0:
+        log.warning(
+            "%d/%d batches failed for %s, used local fallback",
+            failed_batches,
+            len(batches),
+            category,
+        )
+
+    all_consolidated = sorted(
+        all_consolidated, key=lambda x: x.get("original", "").lower()
+    )
+    print(f"  {category} total: {len(all_consolidated)} entries ({total_tokens} tok)")
     log.info(
-        "Consolidated: %d characters, %d terms, %d locations (%d tokens)",
+        "Consolidated %s: %d entries in %d batches (%d tokens, %d failed)",
+        category,
+        len(all_consolidated),
+        len(batches),
+        total_tokens,
+        failed_batches,
+    )
+    return all_consolidated
+
+
+def consolidate_glossary(client: OpenAI, aggregated: dict) -> dict:
+    """Consolidate each category separately via GPT."""
+    entity_count = (
+        len(aggregated["characters"])
+        + len(aggregated["terms"])
+        + len(aggregated["locations"])
+    )
+    log.info("Consolidating %d total entities via GPT (per-category)...", entity_count)
+    print(f"\nConsolidating {entity_count} entities via GPT (per-category):")
+
+    # Finalize a copy of aggregated as fallback
+    fallback = _finalize_aggregated_copy(aggregated)
+
+    categories = [
+        ("characters", CONSOLIDATION_PROMPT_CHARACTERS),
+        ("terms", CONSOLIDATION_PROMPT_TERMS),
+        ("locations", CONSOLIDATION_PROMPT_LOCATIONS),
+    ]
+
+    result = {}
+    for cat_key, prompt in categories:
+        entries = aggregated.get(cat_key, [])
+        if not entries:
+            result[cat_key] = []
+            continue
+
+        consolidated = _consolidate_category(client, cat_key, entries, prompt)
+        if consolidated is not None:
+            result[cat_key] = consolidated
+        else:
+            # fallback to locally aggregated + finalized
+            result[cat_key] = fallback.get(cat_key, [])
+            log.info("Using local fallback for %s (%d entries)", cat_key, len(result[cat_key]))
+
+        time.sleep(DELAY_BETWEEN_REQUESTS)
+
+    chars = len(result.get("characters", []))
+    terms = len(result.get("terms", []))
+    locs = len(result.get("locations", []))
+    print(f"  Total: {chars}ch, {terms}t, {locs}l")
+    log.info(
+        "Consolidation complete: %d characters, %d terms, %d locations",
         chars,
         terms,
         locs,
-        tokens,
     )
     return result
 
 
 def _finalize_aggregated(aggregated: dict) -> dict:
-    """Rename suggested_translation -> translation in locally aggregated data."""
+    """Rename suggested_translation -> translation in locally aggregated data (mutates)."""
     for category in ("characters", "terms", "locations"):
         for entry in aggregated.get(category, []):
             if "suggested_translation" in entry:
                 entry["translation"] = entry.pop("suggested_translation")
     return aggregated
+
+
+def _finalize_aggregated_copy(aggregated: dict) -> dict:
+    """Rename suggested_translation -> translation on a deep copy (does not mutate original)."""
+    import copy
+    data = copy.deepcopy(aggregated)
+    return _finalize_aggregated(data)
 
 
 # ─────────────────────────── MERGE WITH EXISTING ───────────────────────────
@@ -494,6 +675,26 @@ def save_glossary(
     print(f"\nSaved: {output_path} ({total} entries)")
 
 
+# ─────────────────────────── RAW RESULTS CACHE ───────────────────────────
+
+
+def save_raw_results(raw_results: list[dict], cache_path: str):
+    """Save Phase 1 raw results to disk so they can be reused."""
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(raw_results, f, ensure_ascii=False, indent=2)
+    log.info("Raw results cached to %s (%d chunks)", cache_path, len(raw_results))
+    print(f"Raw results cached: {cache_path} ({len(raw_results)} chunks)")
+
+
+def load_raw_results(cache_path: str) -> list[dict]:
+    """Load Phase 1 raw results from cache."""
+    with open(cache_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    log.info("Loaded raw results from %s (%d chunks)", cache_path, len(data))
+    print(f"Loaded raw results: {cache_path} ({len(data)} chunks)")
+    return data
+
+
 # ─────────────────────────── COST ESTIMATION ───────────────────────────
 
 
@@ -503,8 +704,8 @@ def estimate_cost(text: str, chunk_count: int) -> tuple[float, float, float]:
     input_tokens_p1 = len(text) * 0.8 + (500 * chunk_count)
     output_tokens_p1 = chunk_count * 300
 
-    # Phase 2: consolidation
-    input_tokens_p2 = output_tokens_p1 * 0.5
+    # Phase 2: consolidation (3 separate calls — one per category)
+    input_tokens_p2 = output_tokens_p1 * 0.5 + (500 * 3)  # system prompts
     output_tokens_p2 = input_tokens_p2 * 0.8
 
     total_input = input_tokens_p1 + input_tokens_p2
@@ -528,9 +729,17 @@ Examples:
   python3 glossary_builder.py novel.docx -o glossary.json
   python3 glossary_builder.py novel.epub --chunk-size 8000
   python3 glossary_builder.py novel.docx --merge existing_glossary.json
+
+  # Resume from cached Phase 1 results (skip extraction):
+  python3 glossary_builder.py --from-raw novel_raw.json -o glossary.json
         """,
     )
-    parser.add_argument("input", help="Path to .epub or .docx file")
+    parser.add_argument(
+        "input",
+        nargs="?",
+        default=None,
+        help="Path to .epub or .docx file (not needed with --from-raw)",
+    )
     parser.add_argument(
         "-o",
         "--output",
@@ -559,63 +768,94 @@ Examples:
         action="store_true",
         help="Skip GPT consolidation phase, use local deduplication only",
     )
+    parser.add_argument(
+        "--from-raw",
+        type=str,
+        default=None,
+        help="Load cached Phase 1 raw results from file (skip extraction, go straight to aggregation + consolidation)",
+    )
 
     args = parser.parse_args()
 
-    if not os.path.isfile(args.input):
-        sys.exit(f"File not found: {args.input}")
+    # ── Mode: resume from cached raw results ──
+    if args.from_raw:
+        if not os.path.isfile(args.from_raw):
+            sys.exit(f"Raw cache not found: {args.from_raw}")
 
-    output_path = args.output or f"{Path(args.input).stem}_glossary.json"
+        output_path = args.output
+        if not output_path:
+            stem = Path(args.from_raw).stem.replace("_raw", "")
+            output_path = f"{stem}_glossary.json"
 
-    # Extract text
-    log.info("Reading file: %s", args.input)
-    print(f"Reading: {args.input}")
-    text = extract_text(args.input)
-    log.info("Extracted %d characters", len(text))
-    print(f"Extracted {len(text):,} characters")
+        raw_results = load_raw_results(args.from_raw)
+        source_file = args.from_raw
+        chunk_count = len(raw_results)
 
-    if not text.strip():
-        sys.exit("File is empty or text extraction failed.")
+    # ── Mode: full extraction from input file ──
+    else:
+        if not args.input:
+            sys.exit("Specify input file or use --from-raw to resume from cache.")
+        if not os.path.isfile(args.input):
+            sys.exit(f"File not found: {args.input}")
 
-    # Chunk
-    chunks = split_into_chunks(text, max_chars=args.chunk_size)
-    log.info("Split into %d chunks (max %d chars)", len(chunks), args.chunk_size)
-    print(f"Split into {len(chunks)} chunks (max {args.chunk_size} chars)")
+        output_path = args.output or f"{Path(args.input).stem}_glossary.json"
+        raw_cache_path = f"{Path(args.input).stem}_raw.json"
+        source_file = args.input
 
-    # Cost estimate
-    cost, input_tokens, output_tokens = estimate_cost(text, len(chunks))
-    print(f"\nEstimated cost: ${cost:.3f}")
-    print(f"  input ~{input_tokens:.0f} tokens, output ~{output_tokens:.0f} tokens")
-    print(f"  Phase 1: {len(chunks)} extraction calls")
-    if not args.no_consolidate:
-        print(f"  Phase 2: 1 consolidation call")
-    print()
+        # Extract text
+        log.info("Reading file: %s", args.input)
+        print(f"Reading: {args.input}")
+        text = extract_text(args.input)
+        log.info("Extracted %d characters", len(text))
+        print(f"Extracted {len(text):,} characters")
 
-    confirm = input("Continue? [Y/n]: ").strip().lower()
-    if confirm == "n":
-        sys.exit("Cancelled.")
+        if not text.strip():
+            sys.exit("File is empty or text extraction failed.")
 
-    # Phase 1: Extract from each chunk
-    client = OpenAI(api_key=API_KEY)
-    raw_results = []
-    total_tokens = 0
+        # Chunk
+        chunks = split_into_chunks(text, max_chars=args.chunk_size)
+        log.info("Split into %d chunks (max %d chars)", len(chunks), args.chunk_size)
+        print(f"Split into {len(chunks)} chunks (max {args.chunk_size} chars)")
 
-    print(f"\n--- Phase 1: Extraction ---")
-    for i, chunk in enumerate(chunks, 1):
-        result = extract_entities_from_chunk(client, chunk, i, len(chunks))
-        if result:
-            raw_results.append(result)
-        if i < len(chunks):
-            time.sleep(args.delay)
+        # Cost estimate
+        cost, input_tokens, output_tokens = estimate_cost(text, len(chunks))
+        print(f"\nEstimated cost: ${cost:.3f}")
+        print(f"  input ~{input_tokens:.0f} tokens, output ~{output_tokens:.0f} tokens")
+        print(f"  Phase 1: {len(chunks)} extraction calls")
+        if not args.no_consolidate:
+            print(f"  Phase 2: up to 3 consolidation calls (one per category)")
+        print()
 
-    if not raw_results:
-        sys.exit("No entities extracted from any chunk.")
+        confirm = input("Continue? [Y/n]: ").strip().lower()
+        if confirm == "n":
+            sys.exit("Cancelled.")
 
-    succeeded = len(raw_results)
-    failed = len(chunks) - succeeded
-    if failed > 0:
-        log.warning("%d/%d chunks failed extraction", failed, len(chunks))
-        print(f"\nWarning: {failed}/{len(chunks)} chunks failed")
+        # Phase 1: Extract from each chunk
+        client = OpenAI(api_key=API_KEY)
+        raw_results = []
+
+        print(f"\n--- Phase 1: Extraction ---")
+        for i, chunk in enumerate(chunks, 1):
+            result = extract_entities_from_chunk(client, chunk, i, len(chunks))
+            if result:
+                raw_results.append(result)
+            if i < len(chunks):
+                time.sleep(args.delay)
+
+        if not raw_results:
+            sys.exit("No entities extracted from any chunk.")
+
+        # Cache raw results immediately
+        save_raw_results(raw_results, raw_cache_path)
+
+        succeeded = len(raw_results)
+        failed = len(chunks) - succeeded
+        chunk_count = len(chunks)
+        if failed > 0:
+            log.warning("%d/%d chunks failed extraction", failed, chunk_count)
+            print(f"\nWarning: {failed}/{chunk_count} chunks failed")
+
+    # ── From here: same flow for both modes ──
 
     # Aggregate locally
     aggregated = aggregate_raw_results(raw_results)
@@ -631,6 +871,7 @@ Examples:
     )
 
     # Phase 2: GPT Consolidation
+    client = OpenAI(api_key=API_KEY)
     if not args.no_consolidate:
         print(f"\n--- Phase 2: Consolidation ---")
         glossary = consolidate_glossary(client, aggregated)
@@ -643,7 +884,7 @@ Examples:
 
     # Backup and save
     backup_if_exists(output_path)
-    save_glossary(glossary, output_path, args.input, len(chunks))
+    save_glossary(glossary, output_path, source_file, chunk_count)
 
     # Summary
     chars = len(glossary.get("characters", []))
