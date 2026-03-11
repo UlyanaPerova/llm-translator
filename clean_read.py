@@ -1,5 +1,8 @@
 import argparse
+import json
+import shutil
 import time
+from datetime import datetime
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 from logger import setup_logger
@@ -7,6 +10,8 @@ import logging
 
 setup_logger()
 log = logging.getLogger("clean_read")
+
+PROGRESS_FILE = "clean_read_progress.json"
 
 CDP_PORT = 9222
 
@@ -32,6 +37,59 @@ def load_chapters(path: str) -> list[str]:
 
     log.info("Загружено %d глав из %s", len(urls), path)
     return urls
+
+
+# ── Прогресс и бэкап ─────────────────────────────────────────────────
+
+def save_progress(chapters_file: str, current: int, total: int, chapters: list[str]):
+    """Сохраняет текущий прогресс в JSON-файл."""
+    data = {
+        "chapters_file": chapters_file,
+        "current_index": current,
+        "total": total,
+        "processed": chapters[:current + 1],
+        "timestamp": datetime.now().isoformat(),
+    }
+    p = Path(PROGRESS_FILE)
+    # Бэкап предыдущего прогресс-файла
+    if p.exists():
+        backup = p.with_suffix(".json.bak")
+        shutil.copy2(p, backup)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    log.debug("Прогресс сохранён: %d/%d", current + 1, total)
+
+
+def load_progress(chapters_file: str) -> int | None:
+    """Загружает сохранённый прогресс. Возвращает индекс или None."""
+    p = Path(PROGRESS_FILE)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if data.get("chapters_file") != chapters_file:
+            log.info("Прогресс-файл от другого chapters.txt — игнорирую")
+            return None
+        idx = data["current_index"]
+        log.info("Найден сохранённый прогресс: глава %d/%d от %s",
+                 idx + 1, data["total"], data["timestamp"])
+        return idx
+    except (json.JSONDecodeError, KeyError) as e:
+        log.warning("Повреждённый прогресс-файл: %s", e)
+        return None
+
+
+def backup_chapters(path: str):
+    """Создаёт резервную копию chapters.txt при первом запуске дня."""
+    src = Path(path)
+    if not src.exists():
+        return
+    backup_dir = Path("backups")
+    backup_dir.mkdir(exist_ok=True)
+    backup_name = f"{src.stem}_{datetime.now():%Y-%m-%d}{src.suffix}"
+    dest = backup_dir / backup_name
+    if not dest.exists():
+        shutil.copy2(src, dest)
+        log.info("Бэкап: %s → %s", src, dest)
 
 
 # ── Обработка страницы ────────────────────────────────────────────────
@@ -113,15 +171,18 @@ def connect_to_chrome(pw):
     except Exception as e:
         log.error("Не удалось подключиться к Chrome: %s", e)
         print()
-        print("╔══════════════════════════════════════════════════════════════╗")
-        print("║  Chrome не запущен с remote debugging.                      ║")
-        print("║  Запусти его командой:                                      ║")
-        print("║                                                             ║")
-        print('║  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\    ║')
-        print('║  Chrome --remote-debugging-port=9222                        ║')
-        print("║                                                             ║")
-        print("║  Потом запусти скрипт снова.                                ║")
-        print("╚══════════════════════════════════════════════════════════════╝")
+        print("╔════════════════════════════════════════════════════════════════════╗")
+        print("║  Chrome не запущен с remote debugging.                            ║")
+        print("║  Сначала закрой Chrome, потом запусти:                            ║")
+        print("║                                                                   ║")
+        print("║  killall -9 'Google Chrome'                                       ║")
+        print("║  sleep 2                                                          ║")
+        print("║  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\ ║")
+        print("║    --remote-debugging-port=9222 \\                                 ║")
+        print("║    --user-data-dir=/tmp/chrome-debug-profile &                    ║")
+        print("║                                                                   ║")
+        print("║  Потом запусти скрипт снова.                                      ║")
+        print("╚════════════════════════════════════════════════════════════════════╝")
         raise SystemExit(1)
 
     log.info("Подключён. Контексты: %d", len(browser.contexts))
@@ -146,9 +207,23 @@ def main():
 
     chapters = load_chapters(args.file)
     do_scroll = not args.no_scroll
-    current = 0
 
-    log.info("Старт сессии: %d глав, скролл %s", len(chapters), "вкл" if do_scroll else "выкл")
+    # Бэкап chapters.txt
+    backup_chapters(args.file)
+
+    # Проверка сохранённого прогресса
+    current = 0
+    saved = load_progress(args.file)
+    if saved is not None and saved < len(chapters) - 1:
+        answer = input(f"Продолжить с главы {saved + 2}/{len(chapters)}? (y/n): ").strip().lower()
+        if answer in ("y", "yes", "д", "да"):
+            current = saved + 1
+            log.info("Возобновление с главы %d", current + 1)
+        else:
+            log.info("Начинаю сначала")
+
+    log.info("Старт сессии: %d глав (с %d), скролл %s",
+             len(chapters), current + 1, "вкл" if do_scroll else "выкл")
 
     with sync_playwright() as p:
         browser = connect_to_chrome(p)
@@ -162,6 +237,7 @@ def main():
         log.info("[%d/%d] Открываю %s", current + 1, len(chapters), url)
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
         process_page(page, do_scroll)
+        save_progress(args.file, current, len(chapters), chapters)
         log.info("[%d/%d] Готово — фоткай через CleanShot X", current + 1, len(chapters))
 
         # Цикл навигации
@@ -185,6 +261,7 @@ def main():
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     process_page(page, do_scroll)
+                    save_progress(args.file, current, len(chapters), chapters)
                     log.info("[%d/%d] Готово — фоткай", current + 1, len(chapters))
                 except Exception as e:
                     log.error("[%d/%d] Ошибка: %s", current + 1, len(chapters), e)
