@@ -75,7 +75,7 @@ Rules:
    - The only exception: a single utterance split by an attribution — Привет, — сказал он, — как дела?
    - Never use English-style quotation marks for dialogue.
 6. If the source text contains obvious typos, garbled characters, or OCR artifacts, silently correct them based on context before translating.
-7. For character names: transliterate them into Russian on first mention (e.g. Pawarit -> Паварит) and use only the Russian form throughout. For brand names, titles of works, and organization names: keep in English unless they have an established Russian equivalent.
+7. EVERYTHING must be translated or transliterated into Russian. Nothing should remain in English in the final text. For character names: transliterate them into Russian on first mention (e.g. Pawarit -> Паварит) and use only the Russian form throughout. For organization names, skill names, titles, ranks, and any other terms: translate them into Russian. The only exceptions are real-world brand names (iPhone, Google) that are commonly used in Russian as-is.
 8. Preserve the author's tone and intent, but express it with the full richness of Russian — use varied vocabulary, expressive word order, and natural collocations.
 9. Maintain paragraph structure from the original, except where dialogue must be reformatted per rule 5.
 10. Adapt idioms and culturally-specific expressions so they feel organic in Russian. Do NOT invent or add content that isn't in the original.
