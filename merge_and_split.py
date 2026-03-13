@@ -3,8 +3,9 @@
 с интеллектуальным поиском пустых полос и установкой DPI 300.
 
 Использование:
-    python merge_and_split.py image1.png image2.png image3.png
-    python merge_and_split.py *.png --direction horizontal --gap 20
+    python merge_and_split.py                          # берёт все PNG из screenshots/
+    python merge_and_split.py -s my_folder             # берёт PNG из my_folder/
+    python merge_and_split.py image1.png image2.png    # конкретные файлы
 """
 
 import argparse
@@ -153,6 +154,16 @@ def save_with_dpi(img: Image.Image, path: Path) -> None:
     img.save(path, "PNG", optimize=True, dpi=(DPI, DPI), pnginfo=pnginfo)
 
 
+# ── Вспомогательные ───────────────────────────────────────────────────
+
+def _sort_key(p: Path):
+    """Числовая сортировка: 2.png < 10.png < 380.png."""
+    try:
+        return (0, int(p.stem))
+    except ValueError:
+        return (1, p.stem)
+
+
 # ── main ─────────────────────────────────────────────────────────────
 
 def main():
@@ -160,8 +171,12 @@ def main():
         description="Склеить PNG-файлы → нарезать на части → DPI 300"
     )
     parser.add_argument(
-        "images", nargs="+", type=Path,
-        help="Пути к PNG-файлам для склейки",
+        "images", nargs="*", type=Path,
+        help="PNG-файлы для склейки (если не указаны — берутся из --source-dir)",
+    )
+    parser.add_argument(
+        "-s", "--source-dir", type=Path, default=Path("screenshots"),
+        help="Папка с PNG-файлами (по умолчанию: screenshots/). Используется, если файлы не указаны явно",
     )
     parser.add_argument(
         "-d", "--direction",
@@ -204,11 +219,23 @@ def main():
 
     args = parser.parse_args()
 
-    # Проверяем входные файлы
-    for p in args.images:
-        if not p.exists():
-            print(f"Файл не найден: {p}")
+    # Собираем файлы: явно указанные или из source-dir
+    if args.images:
+        files = args.images
+        for p in files:
+            if not p.exists():
+                print(f"Файл не найден: {p}")
+                sys.exit(1)
+    else:
+        src = args.source_dir
+        if not src.is_dir():
+            print(f"Папка не найдена: {src}")
             sys.exit(1)
+        files = sorted(src.glob("*.png"), key=lambda p: _sort_key(p))
+        if not files:
+            print(f"В папке {src} нет PNG-файлов.")
+            sys.exit(1)
+        print(f"Найдено {len(files)} PNG в {src}/")
 
     # Определяем выходную папку
     if args.output_dir:
@@ -226,7 +253,7 @@ def main():
     # 1. Склейка
     print("\n── Склейка ──")
     merged = merge_images(
-        args.images,
+        files,
         direction=args.direction,
         gap=args.gap,
         bg_color=args.bg,
