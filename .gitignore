@@ -1,6 +1,8 @@
 .env
 .DS_Store
 screenshots/
+screenshots_2/
+screenshots_3/
 *.log
 chapters.txt
 
