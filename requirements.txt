@@ -1,6 +1,7 @@
 playwright
 python-dotenv
 openai
+google-genai
 python-docx
 ebooklib
 beautifulsoup4
