@@ -42,7 +42,7 @@ except ImportError:
 
 # ─────────────────────────── CONFIG ───────────────────────────
 
-API_KEY = os.getenv("OPENAI_API_KEY") or sys.exit("OPENAI_API_KEY не найден в окружении. Установи его в .env файле.")
+API_KEY = os.getenv("OPENAI_API_KEY")  # проверяется в main(), чтобы импорт модуля не падал
 MODEL = "gpt-5.1"
 TEMPERATURE = 0.45
 MAX_CHARS_PER_CHUNK = 4000
@@ -62,7 +62,15 @@ Rules:
    - The only exception: a single utterance split by an attribution — Привет, — сказал он, — как дела?
    - Never use English-style quotation marks for dialogue.
 6. If the source text contains obvious typos, garbled characters, or OCR artifacts, silently correct them based on context before translating.
-7. For character names: transliterate them into Russian on first mention (e.g. Pawarit → Паварит) and use only the Russian form throughout. For brand names, titles of works, and organization names: keep in English unless they have an established Russian equivalent.
+7. EVERYTHING must be translated or transliterated into Russian. Nothing should remain in English in the final text — including words in [square brackets]. Translate ALL of the following into Russian:
+   - Character names → transliterate (e.g. Pawarit → Паварит, Hydra → Гидра, Giryeo → Гирё)
+   - Monster/creature names → translate (e.g. [Hydra] → [Гидра], Black Dragon → Чёрный Дракон)
+   - Skill/ability names → translate (e.g. Telekinesis → Телекинез, Faith → Вера)
+   - Item/equipment names → translate (e.g. Dragon Heart → Сердце Дракона)
+   - Location names → translate (e.g. Castle of Sloth → Замок Лени)
+   - Organization names → translate (e.g. Hunter Association → Ассоциация Охотников)
+   - Titles/headlines → translate fully
+   The ONLY exceptions that stay in English: (a) gaming ranks: SS, SSS, S, A, B, C, D, E, F; (b) stat abbreviations: HP, MP, XP, NPC, PVP, PVE, DPS, AOE, ATK, DEF; (c) real-world brands: iPhone, Google.
 8. Preserve the author's tone and intent, but express it with the full richness of Russian — use varied vocabulary, expressive word order, and natural collocations.
 9. Maintain paragraph structure from the original, except where dialogue must be reformatted per rule 5.
 10. Adapt idioms and culturally-specific expressions so they feel organic in Russian. Do NOT invent or add content that isn't in the original.
@@ -86,42 +94,65 @@ def load_glossary(filepath: str) -> dict[str, str]:
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    if "characters" in data or "terms" in data or "locations" in data:
+    if any(k in data for k in ("characters", "terms", "locations", "generics")):
         return _flatten_structured_glossary(data)
     return data
 
 
 def _flatten_structured_glossary(data: dict) -> dict[str, str]:
-    """Convert structured glossary to flat dict with gender/indeclinability annotations."""
+    """Convert structured glossary to flat dict with gender/indeclinability annotations.
+    Entries are ordered by occurrence frequency (descending) so the most important
+    names come first in the prompt."""
     flat = {}
 
-    for char in data.get("characters", []):
+    def by_freq(entries: list[dict]) -> list[dict]:
+        return sorted(entries, key=lambda e: -e.get("occurrences", 0))
+
+    # characters + generics: у обоих есть род, обрабатываются одинаково.
+    # ПРИОРИТЕТ КЛЮЧЕЙ: сначала все originals (по убыванию частоты), потом алиасы —
+    # и никогда без перезаписи (setdefault). Иначе алиас «Gio» на семи персонажах
+    # перезаписывает настоящую запись Gio и в промпт уходит чужой перевод.
+    char_like = by_freq(data.get("characters", []) + data.get("generics", []))
+
+    def annotation_for(char: dict) -> str | None:
         original = char.get("original", "")
         translation = char.get("translation", "")
         if not original or not translation:
-            continue
+            return None
         gender = char.get("gender", "unknown")
-        indeclinable = char.get("indeclinable", False)
         parts = [gender]
-        if indeclinable:
+        if char.get("indeclinable", False):
             parts.append("indeclinable")
-        annotation = f"{translation} [{', '.join(parts)}]"
-        flat[original] = annotation
+        elif char.get("genitive"):
+            # готовый образец склонения — модель подражает примеру надёжнее правила
+            parts.append(f"р.п. {char['genitive']}")
+        return f"{translation} [{', '.join(parts)}]"
+
+    for char in char_like:  # проход 1: originals владеют своими ключами
+        ann = annotation_for(char)
+        if ann:
+            flat.setdefault(char["original"], ann)
+    for char in char_like:  # проход 2: алиасы занимают только свободные ключи
+        ann = annotation_for(char)
+        if not ann:
+            continue
         for alias in char.get("aliases", []):
             if alias:
-                flat[alias] = annotation
+                flat.setdefault(alias, ann)
 
-    for term in data.get("terms", []):
+    # термины и локации НЕ перезаписывают персонажей (setdefault):
+    # дубль «Honey» в терминах без рода стирал пометку [m] у персонажа Хани
+    for term in by_freq(data.get("terms", [])):
         original = term.get("original", "")
         translation = term.get("translation", "")
         if original and translation:
-            flat[original] = translation
+            flat.setdefault(original, translation)
 
-    for loc in data.get("locations", []):
+    for loc in by_freq(data.get("locations", [])):
         original = loc.get("original", "")
         translation = loc.get("translation", "")
         if original and translation:
-            flat[original] = translation
+            flat.setdefault(original, translation)
 
     return flat
 
@@ -872,6 +903,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if not API_KEY:
+        sys.exit("OPENAI_API_KEY не найден в окружении. Установи его в .env файле.")
 
     if not os.path.isfile(args.input):
         sys.exit(f"Файл не найден: {args.input}")
