@@ -20,18 +20,19 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
-from logger import setup_logger
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
 setup_logger(prefix="repair_pro")
 log = logging.getLogger("repair_pro")
 
 load_dotenv()
 
 from docx import Document
-from eng_translator import (
+from translators.eng_translator import (
     extract_text, split_into_chunks, load_glossary, _strip_html_tags, _parse_formatting,
 )
 from docx.shared import Pt, Cm
-import eng_translator_gemini as tg
+import translators.eng_translator_gemini as tg
 
 SOURCE = "The_Artist_Who_Paints_Dungeon.docx"
 TARGET = "The_Artist_Who_Paints_Dungeon_translated_pro.docx"

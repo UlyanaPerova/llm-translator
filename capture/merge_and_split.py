@@ -14,7 +14,8 @@ from pathlib import Path
 
 from PIL import Image, PngImagePlugin
 import numpy as np
-from logger import setup_logger
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
 import logging
 
 setup_logger()

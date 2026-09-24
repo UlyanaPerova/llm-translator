@@ -21,7 +21,9 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 import os
-from logger import setup_logger
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
+from common.api_keys import require_key
 import logging
 
 setup_logger(prefix="eng_translate_gemini")
@@ -36,7 +38,7 @@ except ImportError:
     sys.exit("google-genai не установлен. Запусти: pip install google-genai")
 
 # Переиспользуем извлечение текста, чанкование, глоссарий и сохранение .docx
-from eng_translator import (
+from translators.eng_translator import (
     extract_text,
     split_into_chunks,
     get_tail_paragraphs,
@@ -410,7 +412,7 @@ _RU_VOWELS_DRIFT = "аеёиоуыэюя"
 
 def load_litrpg_templates() -> dict[str, str]:
     """Load the fixed LitRPG term dictionary (litrpg_glossary.json next to script)."""
-    path = Path(__file__).parent / "litrpg_glossary.json"
+    path = Path(__file__).resolve().parents[1] / "glossary" / "litrpg_glossary.json"
     if not path.is_file():
         return {}
     try:
@@ -964,8 +966,8 @@ def main():
 
     args = parser.parse_args()
 
-    if not API_KEY:
-        sys.exit("GEMINI_API_KEY не найден в .env\nПолучить: https://aistudio.google.com/apikey")
+    global API_KEY
+    API_KEY = require_key("gemini")
 
     global THINKING_BUDGET_OVERRIDE
     THINKING_BUDGET_OVERRIDE = args.thinking_budget

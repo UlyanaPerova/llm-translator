@@ -19,13 +19,16 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
-from logger import setup_logger
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
+from common.api_keys import require_key
 setup_logger(prefix="fix_hani_cloak")
 log = logging.getLogger("fix_hani_cloak")
 
 from docx import Document
 from openai import OpenAI
-from fix_name_poisoning import para_tagged_text, rewrite_para
+from postedit.fix_name_poisoning import para_tagged_text, rewrite_para
 
 TARGET = "The_Artist_Who_Paints_Dungeon_translated_pro.docx"
 MODEL = "gpt-5.1"
@@ -154,7 +157,7 @@ def run_pass(client, paras, indices, prompt, guard, label, post_check=None):
 
 
 def main():
-    api_key = os.getenv("OPENAI_API_KEY") or sys.exit("OPENAI_API_KEY не найден")
+    api_key = require_key("openai")
     client = OpenAI(api_key=api_key)
     doc = Document(TARGET)
     paras = doc.paragraphs

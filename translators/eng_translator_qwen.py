@@ -18,7 +18,9 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 import os
-from logger import setup_logger
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
+from common.api_keys import require_key
 import logging
 
 setup_logger(prefix="eng_translate_qwen")
@@ -47,9 +49,7 @@ except ImportError:
 
 # ─────────────────────────── CONFIG ───────────────────────────
 
-API_KEY = os.getenv("DASHSCOPE_API_KEY") or sys.exit(
-    "DASHSCOPE_API_KEY not found. Set it in .env file."
-)
+API_KEY = os.getenv("DASHSCOPE_API_KEY")  # проверяется в main() через require_key
 BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 MODEL = "qwen-mt-plus"
 TEMPERATURE = 0.45
@@ -1016,7 +1016,7 @@ Examples:
     cache_meta = {"input": args.input, "model": selected_model, "chunk_size": args.chunk_size}
 
     # Translate
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    client = OpenAI(api_key=require_key("qwen"), base_url=BASE_URL)
     translated = []
     start_chunk = 1
 

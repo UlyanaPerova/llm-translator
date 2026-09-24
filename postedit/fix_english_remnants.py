@@ -18,7 +18,9 @@ from copy import deepcopy
 
 from dotenv import load_dotenv
 from docx import Document
-from logger import setup_logger
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
+from common.api_keys import require_key
 import logging
 
 load_dotenv()
@@ -151,9 +153,7 @@ def main():
         return
 
     # Инициализируем Gemini
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        sys.exit("GEMINI_API_KEY не найден в .env")
+    api_key = require_key("gemini")
 
     from google import genai
     client = genai.Client(api_key=api_key)
@@ -190,7 +190,7 @@ def main():
 
         # Заменяем текст в абзаце — очищаем все runs и пишем заново
         # Сохраняем форматирование через HTML-теги
-        from ocr_vision import _parse_formatting
+        from capture.ocr_vision import _parse_formatting
 
         # Удаляем старые runs
         for run in para.runs:

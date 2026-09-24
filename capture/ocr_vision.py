@@ -23,7 +23,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from docx import Document
 from docx.shared import Pt, Cm
-from logger import setup_logger
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
+from common.api_keys import require_key
 import logging
 
 load_dotenv()
@@ -165,9 +167,7 @@ def _ocr_gemini(image_path: Path) -> str:
     from google.genai import types
     from PIL import Image
 
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        sys.exit("GEMINI_API_KEY не найден в .env\nПолучить: https://aistudio.google.com/apikey")
+    api_key = require_key("gemini")
 
     client = genai.Client(api_key=api_key)
     img = Image.open(image_path)
@@ -207,9 +207,7 @@ def _ocr_openai(image_path: Path) -> str:
     """OCR через OpenAI GPT-4o."""
     from openai import OpenAI
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        sys.exit("OPENAI_API_KEY не найден в .env")
+    api_key = require_key("openai")
 
     client = OpenAI(api_key=api_key)
     b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")

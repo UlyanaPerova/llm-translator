@@ -22,13 +22,16 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
-from logger import setup_logger
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
+from common.api_keys import require_key
 setup_logger(prefix="canon_rules")
 log = logging.getLogger("canon_rules")
 
 from docx import Document
 from openai import OpenAI
-from fix_name_poisoning import para_tagged_text, rewrite_para
+from postedit.fix_name_poisoning import para_tagged_text, rewrite_para
 
 TARGET = "The_Artist_Who_Paints_Dungeon_translated_pro.docx"
 CACHE = ".canon_yu_cache.json"
@@ -141,7 +144,7 @@ def diff_is_safe(original: str, fixed: str) -> bool:
 
 
 def main():
-    api_key = os.getenv("OPENAI_API_KEY") or sys.exit("OPENAI_API_KEY не найден")
+    api_key = require_key("openai")
     client = OpenAI(api_key=api_key)
 
     doc = Document(TARGET)

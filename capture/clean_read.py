@@ -5,7 +5,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 from playwright.sync_api import sync_playwright
-from logger import setup_logger
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
 import logging
 
 setup_logger()

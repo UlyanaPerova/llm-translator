@@ -37,3 +37,7 @@ backups/
 # Old standalone scripts (superseded by merge_and_split.py)
 merge_png.py
 imagedivide.py
+
+# Demo outputs
+examples/*.docx
+!docs/images/*.png

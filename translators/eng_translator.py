@@ -13,7 +13,9 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 import os
-from logger import setup_logger
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
+from common.api_keys import require_key
 import logging
 
 setup_logger(prefix="eng_translate")
@@ -904,8 +906,8 @@ def main():
 
     args = parser.parse_args()
 
-    if not API_KEY:
-        sys.exit("OPENAI_API_KEY не найден в окружении. Установи его в .env файле.")
+    global API_KEY
+    API_KEY = require_key("openai")
 
     if not os.path.isfile(args.input):
         sys.exit(f"Файл не найден: {args.input}")

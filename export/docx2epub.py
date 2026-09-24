@@ -24,7 +24,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 from xml.etree import ElementTree as ET
-from logger import setup_logger
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
 import logging
 
 setup_logger()

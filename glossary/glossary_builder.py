@@ -15,7 +15,9 @@ from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
 import os
-from logger import setup_logger
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # корень проекта в sys.path
+from common.logger import setup_logger
+from common.api_keys import require_key
 import logging
 
 setup_logger(prefix="glossary_builder")
@@ -28,13 +30,11 @@ try:
 except ImportError:
     sys.exit("openai not installed. Run: pip install openai")
 
-from eng_translator import extract_text, split_into_chunks
+from translators.eng_translator import extract_text, split_into_chunks
 
 # ─────────────────────────── CONFIG ───────────────────────────
 
-API_KEY = os.getenv("OPENAI_API_KEY") or sys.exit(
-    "OPENAI_API_KEY not found. Set it in .env"
-)
+API_KEY = os.getenv("OPENAI_API_KEY")  # проверяется в main() через require_key
 MODEL = "gpt-5.1"
 TEMPERATURE_EXTRACT = 0.3
 TEMPERATURE_CONSOLIDATE = 0.2
@@ -1294,7 +1294,7 @@ def estimate_cost(text: str, chunk_count: int) -> tuple[float, float, float]:
 
 
 def main():
-    global MODEL
+    global MODEL, API_KEY
 
     parser = argparse.ArgumentParser(
         description="Build a structured glossary from a novel for literary translation",
@@ -1403,6 +1403,7 @@ Examples:
     )
 
     args = parser.parse_args()
+    API_KEY = require_key("openai")
 
     MODEL = args.model
 

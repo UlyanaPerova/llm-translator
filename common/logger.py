@@ -3,8 +3,11 @@ import os
 from datetime import datetime
 
 
-def setup_logger(log_dir="logs", prefix="clean_read"):
-    """Настройка логгера: вывод в консоль + файл в logs/."""
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+
+
+def setup_logger(log_dir=LOG_DIR, prefix="clean_read"):
+    """Настройка логгера: вывод в консоль + файл в logs/ (в корне проекта)."""
     os.makedirs(log_dir, exist_ok=True)
 
     log_file = os.path.join(
