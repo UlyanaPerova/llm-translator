@@ -1,7 +1,7 @@
 # LLM Novel Translator (EN → RU)
 
-A toolkit for translating web novels from **English into Russian** with LLMs — from capturing
-chapters in the browser to a finished, formatted `.epub`.
+A toolkit for translating novels from **English into Russian** with LLMs. It takes a book as
+`.epub`, `.docx`, `.md` or `.txt` and produces a translated, formatted `.docx` / `.epub`.
 
 The pipeline is built around a few ideas:
 
@@ -42,38 +42,39 @@ with their original file timestamps as both author and committer date
 (`GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE`), so the commit history reflects when each file was
 actually written.
 
-## Pipeline
+## How it works
 
 ```
- web chapters ─► capture/clean_read.py ─► screenshots/*.png
-                                        │
-                          capture/merge_and_split.py (merge, slice on blank bands, 300 DPI)
-                                        │
-                             capture/ocr_vision.py (Gemini / GPT-4o Vision → .docx)
-                                        │
-             source .docx / .epub / .md / .txt
-                                        │
-                        glossary/glossary_builder.py (→ <book>_glossary.json)
-                                        │
-                     translate.py  (picks the engine by API key)
-                                        │
-        ┌───────────────────────────────┼───────────────────────────────┐
- eng_translator.py            eng_translator_qwen.py           eng_translator_gemini.py
-   (OpenAI GPT)                  (Qwen-MT)                        (Gemini)
-        └───────────────────────────────┼───────────────────────────────┘
-                                        │
-          postedit/ scripts (failed chunks, names, leftovers)
-                                        │
-              export/heading.py  (chapter headings, page breaks)
-                                        │
-             export/docx2epub.py (→ .epub with cover and TOC)
+ book.epub / .docx / .md / .txt
+            │
+            ▼
+ glossary/glossary_builder.py     1. glossary: names, terms, places, gender,
+            │                        declension, ты/вы relations  → <book>_glossary.json
+            ▼
+ translate.py                     2. picks the engine by the API key you have
+            │
+   ┌────────┼─────────────┐
+   ▼        ▼             ▼
+ GPT     Gemini        Qwen-MT     3. chunked translation with overlap context,
+   └────────┼─────────────┘           per-chunk glossary, QA and auto-correction
+            ▼
+ postedit/                        4. re-translate failed chunks, fix leftovers and names
+            ▼
+ export/heading.py → export/docx2epub.py   5. chapter headings → .epub with cover and TOC
 ```
+
+The core is the text-in / text-out chain above.
+
+**Optional: sources without a text file.** When a book is available only as web pages, the
+`capture/` scripts produce the `.docx` input: `clean_read.py` screenshots chapters in the browser,
+`merge_and_split.py` prepares the images, and `ocr_vision.py` recognizes the text with a Vision
+model. This was the first approach in the project. The translator itself doesn't depend on it.
 
 ## Project structure
 
 ```
 translate.py            entry point: detects the API key's provider and runs that translator
-capture/                browser capture, screenshot merge/slice, Vision OCR
+capture/                optional input stage: browser screenshots → Vision OCR → .docx
 glossary/               glossary builder + fixed LitRPG term templates
 translators/            GPT, Qwen-MT and Gemini translators
 postedit/               repair and diff-guarded fix scripts
@@ -86,7 +87,7 @@ examples/               demo chapter
 Scripts can be run from anywhere (`python3 translators/eng_translator.py …`); each one adds the
 project root to `sys.path` and reads `.env` from the root. Logs go to `logs/`.
 
-### `capture/` — capture and OCR
+### `capture/` — optional: capture and OCR
 
 | File | What it does |
 |---|---|
