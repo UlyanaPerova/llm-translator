@@ -5,7 +5,7 @@
 ## Подготовка (один раз)
 
 ```bash
-cd /Users/ulyanaperova/Code/translation_project
+cd translation_project
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -27,7 +27,7 @@ sleep 2
 ## Запуск
 
 ```bash
-cd /Users/ulyanaperova/Code/translation_project
+cd translation_project
 source venv/bin/activate
 python3 clean_read.py
 ```

@@ -17,7 +17,7 @@ import shutil
 from datetime import datetime
 
 from dotenv import load_dotenv
-load_dotenv("/Users/ulyanaperova/Code/translation_project/.env")
+load_dotenv()
 
 from logger import setup_logger
 setup_logger(prefix="fix_hani_cloak")

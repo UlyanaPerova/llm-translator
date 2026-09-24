@@ -3,7 +3,7 @@
 ## 1. Перейти в папку с проектом
 
 ```bash
-cd /Users/ulyanaperova/Pet_projects/Books/deobfuscation/CleanShotX
+cd path/to/screenshots_folder
 ```
 
 ## 2. Создать виртуальное окружение (один раз)
@@ -43,7 +43,7 @@ deactivate
 Шаги 2 и 4 уже не нужны. Достаточно:
 
 ```bash
-cd /Users/ulyanaperova/Pet_projects/Books/deobfuscation/CleanShotX
+cd path/to/screenshots_folder
 source .venv/bin/activate
 python3 imagedivide.py
 deactivate

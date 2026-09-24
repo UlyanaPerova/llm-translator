@@ -18,3 +18,22 @@ __pycache__/
 *_cache.json
 *.epub
 ~$*
+
+# Secrets / local env
+.env.*
+!.env.example
+venv/
+.venv/
+
+# Book content, working files, covers
+backups/
+*.pages
+*.jpg
+*.jpeg
+*.png
+*.bak
+!litrpg_glossary.json
+
+# Old standalone scripts (superseded by merge_and_split.py)
+merge_png.py
+imagedivide.py

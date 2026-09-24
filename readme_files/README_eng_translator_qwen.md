@@ -16,7 +16,7 @@
 ## Подготовка (один раз)
 
 ```bash
-cd /Users/ulyanaperova/Code/translation_project
+cd translation_project
 source venv/bin/activate
 pip install openai python-docx python-dotenv
 # Для .epub:
@@ -34,7 +34,7 @@ DASHSCOPE_API_KEY=sk-ваш-ключ
 ## Запуск
 
 ```bash
-cd /Users/ulyanaperova/Code/translation_project
+cd translation_project
 source venv/bin/activate
 
 # Базовый запуск

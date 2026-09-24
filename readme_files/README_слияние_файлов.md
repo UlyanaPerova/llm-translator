@@ -9,7 +9,7 @@
 Открой **Terminal** (`Cmd + Space` → «Terminal») и выполни:
 
 ```bash
-cd "/Users/ulyanaperova/Pet_projects/Books/deobfuscation/Подготовка_файлов(нарезка_слияние)/Слияние_файлов"
+cd "path/to/images_folder"
 ```
 
 ### Первый запуск (один раз)
