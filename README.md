@@ -1,13 +1,16 @@
-# LLM Novel Translator (EN → RU)
+# LLM Long-Text Translator (EN → RU)
 
-A toolkit for translating novels from **English into Russian** with LLMs. It takes a book as
+**Developed: 22 February – 21 July 2026** · Author: Ulyana Perova
+
+A toolkit for translating **large texts** from **English into Russian** with LLMs: books,
+web novels, long documents and any other text too long for a single request. It takes
 `.epub`, `.docx`, `.md` or `.txt` and produces a translated, formatted `.docx` / `.epub`.
 
 The pipeline is built around a few ideas:
 
 - **Glossary first.** Before translating, a glossary of characters, terms and locations is
-  extracted from the whole book, with gender, declension rules and "ты/вы" relations between
-  characters. It is injected per chunk, so names stay consistent across hundreds of chapters.
+  extracted from the whole text, with gender, declension rules and "ты/вы" relations between
+  characters. It is injected per chunk, so names and terms stay consistent across hundreds of pages.
 - **Several translation engines.** The same pipeline works with OpenAI GPT, Alibaba Qwen-MT and
   Google Gemini, so engines can be compared on quality and cost.
 - **Automatic QA on every chunk.** Russian punctuation (« » quotes, em-dash dialogue), leftover
@@ -25,8 +28,6 @@ The pipeline is built around a few ideas:
 text written for this README; the translation above is the real, unedited output of the run shown.</sub>
 
 ## Timeline
-
-The translator was developed between **22 February 2026** and **21 July 2026**.
 
 | Period | Milestone |
 |---|---|
